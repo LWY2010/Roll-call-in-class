@@ -34,7 +34,7 @@ ROSTER_FILE = DATA_DIR / "roster.json"
 BG          = "#c5d4e0"
 BG_DEEP     = "#aec2d2"
 PANEL       = "#dde8f0"
-CARD        = "#eaf1f6"
+CARD        = "#2c5282"      # ★ 结果卡片：改成深海蓝，跟白字强烈对比
 LINE        = "#9eb4c7"
 TEXT        = "#1a365d"
 MUTED       = "#4a6884"
@@ -50,9 +50,10 @@ CHIP_TEXT   = "#1a365d"
 CHIP_ON_BG  = "#2c5282"
 CHIP_ON_FG  = "#ffffff"
 
-# ============ 圆角参数 ============
-RADIUS_EXPANDED  = 18    # 展开时圆角半径
-RADIUS_COLLAPSED = 6     # 收起时圆角半径
+# ============ 圆角参数（★ 改小，避免遮挡）============
+RADIUS_EXPANDED  = 10
+RADIUS_COLLAPSED = 4
+RADIUS_NUMPAD    = 8
 
 # ============ 屏蔽名单 ============
 BLOCKED_NAMES = {'赖韦宇'}
@@ -76,16 +77,9 @@ def save_json(path, data):
 
 # ============ 圆角裁切（Windows API）============
 def set_rounded_region(hwnd, w, h, radius):
-    """
-    把窗口裁切成圆角矩形。
-    hwnd: 窗口句柄
-    w, h: 窗口宽高
-    radius: 圆角半径
-    """
     if sys.platform != 'win32':
         return
     try:
-        # CreateRoundRectRgn(left, top, right, bottom, ellipseW, ellipseH)
         rgn = ctypes.windll.gdi32.CreateRoundRectRgn(
             0, 0, w + 1, h + 1, radius * 2, radius * 2
         )
@@ -94,7 +88,6 @@ def set_rounded_region(hwnd, w, h, radius):
         pass
 
 def apply_rounded(root, w, h, radius):
-    """对 tkinter 窗口应用圆角（窗口必须先 update_idletasks）"""
     if sys.platform != 'win32':
         return
     try:
@@ -257,7 +250,7 @@ class App:
         self._refresh_filters()
         self._update_status()
         if not self.students:
-            self.result_label.config(text="尚未导入花名册", fg=MUTED)
+            self.result_label.config(text="尚未导入花名册", fg="#c5d4e0")
 
     # ------------------------------------------------------------
     #  展开态 UI
@@ -292,9 +285,9 @@ class App:
             w.bind('<Button-1>', self._start_drag)
             w.bind('<B1-Motion>', self._on_drag)
 
-        # 结果卡片
+        # ★ 结果卡片：深海蓝底 + 纯白字
         card = tk.Frame(f, bg=CARD, height=120,
-                         highlightbackground=LINE, highlightthickness=1)
+                         highlightbackground=ACCENT, highlightthickness=2)
         card.pack(fill='x', padx=12, pady=(14, 10))
         card.pack_propagate(False)
         self.result_label = tk.Label(card, text="准备就绪", fg="#ffffff", bg=CARD,
@@ -374,16 +367,16 @@ class App:
                                    font=('Microsoft YaHei', 14, 'bold'))
         self.draw_btn.pack(fill='x', padx=12, pady=(14, 0), ipady=14)
 
-        # 底部状态栏
+        # ★ 底部状态栏：往上留 8px，避免被圆角切到
         bottom = tk.Frame(f, bg=BG)
-        bottom.pack(fill='x', padx=14, pady=(10, 12))
+        bottom.pack(fill='x', padx=14, pady=(10, 16))
         self.status_label = tk.Label(bottom, text="", fg=MUTED, bg=BG,
                                       font=('Microsoft YaHei', 9), anchor='w')
         self.status_label.pack(side='left', fill='x', expand=True)
 
         menu_btn = tk.Label(bottom, text="⚙ 设置", fg=MUTED, bg=BG,
                              font=('Microsoft YaHei', 9), cursor='hand2')
-        menu_btn.pack(side='right')
+        menu_btn.pack(side='right', padx=(0, 6))
         menu_btn.bind('<Button-1>', self.show_menu)
         menu_btn.bind('<Enter>', lambda e: menu_btn.config(fg=ACCENT))
         menu_btn.bind('<Leave>', lambda e: menu_btn.config(fg=MUTED))
@@ -449,7 +442,6 @@ class App:
         self.root.attributes('-alpha', 0.55)
         self._cancel_schedule()
 
-        # 收起后应用小圆角
         self.root.after(40, lambda: apply_rounded(
             self.root, self.COL_W, self.COL_H, RADIUS_COLLAPSED))
 
@@ -472,7 +464,6 @@ class App:
         self.root.geometry(f"{self.EXP_W}x{self.EXP_H}+{x}+{y}")
         self.root.attributes('-alpha', 1.0)
 
-        # 展开后应用大圆角
         self.root.after(40, lambda: apply_rounded(
             self.root, self.EXP_W, self.EXP_H, RADIUS_EXPANDED))
 
@@ -627,7 +618,6 @@ class App:
                 if self.pad_buffer == '0': self.pad_buffer = ''
                 if len(self.pad_buffer) < 2:
                     self.pad_buffer += k
-            # 实时同步到主数字框
             self.count_entry.delete(0, 'end')
             self.count_entry.insert(0, self.pad_buffer)
             try:
@@ -646,7 +636,7 @@ class App:
             r = tk.Frame(grid, bg=ACCENT); r.pack(fill='x', pady=2)
             for k in row:
                 txt = '←' if k=='del' else ('C' if k=='clr' else k)
-                lbl = tk.Label(r, text=txt, bg=CARD, fg=ACCENT,
+                lbl = tk.Label(r, text=txt, bg=CARD, fg="#ffffff",
                                font=('Microsoft YaHei', 13, 'bold'),
                                width=4, height=2, cursor='hand2')
                 lbl.pack(side='left', padx=2)
@@ -657,8 +647,7 @@ class App:
         ok.pack(fill='x', pady=(4, 0))
         ok.bind('<Button-1>', lambda e: press('ok'))
 
-        # 小键盘也做圆角
-        win.after(50, lambda: apply_rounded(win, 180, 260, 12))
+        win.after(50, lambda: apply_rounded(win, 180, 260, RADIUS_NUMPAD))
 
     # ------------------------------------------------------------
     #  抽取
@@ -786,7 +775,7 @@ class App:
         save_json(ROSTER_FILE, [])
         self.filters = {'gender': 'all', 'subjects': set(), 'groups': set()}
         self._refresh_filters(); self._update_status()
-        self.result_label.config(text="花名册已清空", fg=MUTED)
+        self.result_label.config(text="花名册已清空", fg="#c5d4e0")
 
     def show_help(self):
         messagebox.showinfo("使用说明",
