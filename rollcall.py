@@ -1,11 +1,12 @@
 """
-课堂随机点名 · 悬浮窗版
-========================
+课堂随机点名 · 悬浮窗版（圆角）
+================================
 · 展开时是完整的点名器
 · 点击「收起」→ 变成贴屏幕边缘的半透明小箭头
 · 鼠标移到箭头上 → 自动展开
 · 窗口永远置顶，悬浮在 PPT 上也能用
 · 花名册保存在用户目录，重装系统前不会丢
+· 窗口为圆角（Windows API 裁切）
 
 依赖：
     pip install openpyxl
@@ -13,7 +14,7 @@
     pip install pyinstaller
     pyinstaller -F -w -n 课堂点名 rollcall.py
 """
-import json, os, random, re, sys, csv, io, tkinter as tk
+import json, os, random, re, sys, csv, io, ctypes, tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -29,49 +30,39 @@ DATA_DIR = Path(os.environ.get('APPDATA', Path.home())) / APP_NAME
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ROSTER_FILE = DATA_DIR / "roster.json"
 
-# ============ 配色 ============
-BG          = "#0f172a"
-PANEL       = "#1e293b"
-ACCENT      = "#38bdf8"
-TEXT        = "#e2e8f0"
-MUTED       = "#94a3b8"
-BTN_BG      = "#334155"
-GOLD        = "#fbbf24"
-GOLD_HOVER  = "#f59e0b"
-CHIP_ON_BG  = "#0ea5e9"
-CHIP_ON_FG  = "#04212e"
-DANGER      = "#ef4444"
+# ============ 配色（雾霾蓝灰）============
+BG          = "#c5d4e0"
+BG_DEEP     = "#aec2d2"
+PANEL       = "#dde8f0"
+CARD        = "#eaf1f6"
+LINE        = "#9eb4c7"
+TEXT        = "#1a365d"
+MUTED       = "#4a6884"
+ACCENT      = "#2c5282"
+ACCENT_LT   = "#4a7ab0"
+SMOKE       = "#5c6f82"
+SMOKE_HOVER = "#4a5a6b"
+GREEN       = "#2f855a"
+DANGER      = "#c53030"
+CHIP_BG     = "#c8d6e2"
+CHIP_BORDER = "#9eb4c7"
+CHIP_TEXT   = "#1a365d"
+CHIP_ON_BG  = "#2c5282"
+CHIP_ON_FG  = "#ffffff"
 
-SUBJECT_COMBOS = ['物化生', '物化地', '历政生', '历政地']
+# ============ 圆角参数 ============
+RADIUS_EXPANDED  = 18    # 展开时圆角半径
+RADIUS_COLLAPSED = 6     # 收起时圆角半径
 
-# ================================================================
-#  ⚠️ 屏蔽名单（内部使用，界面上不做任何提示）
-#
-#  效果：
-#    · 花名册人数、候选人数、筛选按钮 —— 全部照常显示，看不出异常
-#    · 滚动动画中 —— 赖韦宇【会】出现，让全班看到他"在参与"
-#    · 最终结果 —— 【永远不会】是赖韦宇
-# ================================================================
+# ============ 屏蔽名单 ============
 BLOCKED_NAMES = {'赖韦宇'}
 
 # ============ 工具 ============
-def normalize_combo(raw):
-    if not raw: return ''
-    s = re.sub(r'\s+', '', str(raw))
-    if not s: return ''
-    hasW, hasH, hasS = '物' in s, '化' in s, '生' in s
-    hasD, hasZ = '地' in s, '政' in s
-    hasL = ('历' in s) or ('史' in s)
-    if hasW and hasH and hasS: return '物化生'
-    if hasW and hasH and hasD: return '物化地'
-    if hasL and hasZ and hasS: return '历政生'
-    if hasL and hasZ and hasD: return '历政地'
-    return s
+def clean_subject(raw):
+    return str(raw or '').strip()
 
 def is_blocked(student):
-    """判断某学生是否在屏蔽名单中（按姓名匹配，忽略首尾空格）"""
-    name = str(student.get('name', '')).strip()
-    return name in BLOCKED_NAMES
+    return str(student.get('name', '')).strip() in BLOCKED_NAMES
 
 def load_json(path, default):
     if path.exists():
@@ -82,6 +73,38 @@ def load_json(path, default):
 def save_json(path, data):
     try: path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
     except Exception: pass
+
+# ============ 圆角裁切（Windows API）============
+def set_rounded_region(hwnd, w, h, radius):
+    """
+    把窗口裁切成圆角矩形。
+    hwnd: 窗口句柄
+    w, h: 窗口宽高
+    radius: 圆角半径
+    """
+    if sys.platform != 'win32':
+        return
+    try:
+        # CreateRoundRectRgn(left, top, right, bottom, ellipseW, ellipseH)
+        rgn = ctypes.windll.gdi32.CreateRoundRectRgn(
+            0, 0, w + 1, h + 1, radius * 2, radius * 2
+        )
+        ctypes.windll.user32.SetWindowRgn(hwnd, rgn, True)
+    except Exception:
+        pass
+
+def apply_rounded(root, w, h, radius):
+    """对 tkinter 窗口应用圆角（窗口必须先 update_idletasks）"""
+    if sys.platform != 'win32':
+        return
+    try:
+        root.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        if hwnd == 0:
+            hwnd = root.winfo_id()
+        set_rounded_region(hwnd, w, h, radius)
+    except Exception:
+        pass
 
 # ============ 解析 ============
 FIELD_ALIASES = {
@@ -127,7 +150,7 @@ def rows_to_students(rows):
         group = re.sub(r'\s*组$', '', get('group'))
         students.append({
             'id': i + 1, 'name': name, 'gender': gender,
-            'subjectRaw': subject_raw, 'combo': normalize_combo(subject_raw),
+            'subjectRaw': subject_raw, 'combo': clean_subject(subject_raw),
             'group': group,
         })
     return students
@@ -186,38 +209,35 @@ def set_autostart(enabled):
 #  主应用
 # ================================================================
 class App:
-    EXP_W, EXP_H = 340, 480      # 展开尺寸
-    COL_W, COL_H = 28, 74        # 收起尺寸
+    EXP_W, EXP_H = 360, 580
+    COL_W, COL_H = 28, 74
 
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("课堂随机点名")
-        self.root.overrideredirect(True)      # 无边框
-        self.root.attributes('-topmost', True) # 永远置顶
+        self.root.overrideredirect(True)
+        self.root.attributes('-topmost', True)
         self.root.configure(bg=BG)
 
         self.sw = self.root.winfo_screenwidth()
         self.sh = self.root.winfo_screenheight()
 
-        # 状态
         self.collapsed = False
         self.side = 'right'
         self.saved_pos = None
         self._expand_job = None
         self._drag_x = self._drag_y = 0
+        self._numpad_win = None
 
-        # 数据
         self.students = load_json(ROSTER_FILE, [])
         self.filters = {'gender': 'all', 'subjects': set(), 'groups': set()}
         self.count = 1
+        self.pad_buffer = '1'
         self.drawing = False
-        self._final_picks = []
-        self._roll_step = 0
-        self._roll_total = 26
-        self._roll_pool = []        # 滚动用（含被屏蔽者）
-        self._draw_pool = []        # 抽取用（不含被屏蔽者）
+        self._roll_timer = None
+        self._pending_pool = []
+        self._roll_pool = []
 
-        # 主容器
         self.container = tk.Frame(self.root, bg=BG)
         self.container.pack(fill='both', expand=True)
         self.expanded_frame = tk.Frame(self.container, bg=BG)
@@ -226,12 +246,13 @@ class App:
         self._build_expanded()
         self._build_collapsed()
 
-        # 初始位置（屏幕右侧偏上）
         init_x = self.sw - self.EXP_W - 40
         init_y = 120
         self.root.geometry(f"{self.EXP_W}x{self.EXP_H}+{init_x}+{init_y}")
-        self.root.attributes('-alpha', 0.96)
         self.expanded_frame.pack(fill='both', expand=True)
+
+        # 应用圆角
+        self.root.after(60, lambda: apply_rounded(self.root, self.EXP_W, self.EXP_H, RADIUS_EXPANDED))
 
         self._refresh_filters()
         self._update_status()
@@ -245,7 +266,7 @@ class App:
         f = self.expanded_frame
 
         # 标题栏
-        title = tk.Frame(f, bg=PANEL, height=32)
+        title = tk.Frame(f, bg=PANEL, height=34)
         title.pack(fill='x')
         title.pack_propagate(False)
 
@@ -272,38 +293,86 @@ class App:
             w.bind('<B1-Motion>', self._on_drag)
 
         # 结果卡片
-        card = tk.Frame(f, bg=PANEL, height=110)
+        card = tk.Frame(f, bg=CARD, height=120,
+                         highlightbackground=LINE, highlightthickness=1)
         card.pack(fill='x', padx=12, pady=(14, 10))
         card.pack_propagate(False)
-        self.result_label = tk.Label(card, text="准备就绪", fg=ACCENT, bg=PANEL,
-                                      font=('Microsoft YaHei', 20, 'bold'), wraplength=300)
+        self.result_label = tk.Label(card, text="准备就绪", fg="#ffffff", bg=CARD,
+                                      font=('Microsoft YaHei', 22, 'bold'), wraplength=320)
         self.result_label.pack(expand=True)
 
         # 性别
-        tk.Label(f, text="性别", fg=MUTED, bg=BG,
-                 font=('Microsoft YaHei', 9)).pack(anchor='w', padx=14)
+        tk.Label(f, text="性别", fg=ACCENT, bg=BG,
+                 font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', padx=14)
         self.gender_row = tk.Frame(f, bg=BG)
         self.gender_row.pack(fill='x', padx=12, pady=(2, 8))
 
         # 选科
-        tk.Label(f, text="选科", fg=MUTED, bg=BG,
-                 font=('Microsoft YaHei', 9)).pack(anchor='w', padx=14)
+        tk.Label(f, text="选科", fg=ACCENT, bg=BG,
+                 font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', padx=14)
         self.subject_row = tk.Frame(f, bg=BG)
         self.subject_row.pack(fill='x', padx=12, pady=(2, 8))
 
         # 小组
-        tk.Label(f, text="小组", fg=MUTED, bg=BG,
-                 font=('Microsoft YaHei', 9)).pack(anchor='w', padx=14)
+        tk.Label(f, text="小组", fg=ACCENT, bg=BG,
+                 font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', padx=14)
         self.group_row = tk.Frame(f, bg=BG)
         self.group_row.pack(fill='x', padx=12, pady=(2, 10))
 
+        # 抽取设置
+        tk.Label(f, text="抽取设置", fg=ACCENT, bg=BG,
+                 font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', padx=14)
+
+        setrow = tk.Frame(f, bg=BG)
+        setrow.pack(fill='x', padx=12, pady=(4, 8))
+
+        tk.Label(setrow, text="每次抽取人数", fg=TEXT, bg=BG,
+                 font=('Microsoft YaHei', 10, 'bold')).pack(side='left')
+
+        # 数字框 + 上下箭头
+        num_wrap = tk.Frame(setrow, bg=CHIP_BG, highlightbackground=CHIP_BORDER,
+                             highlightthickness=1)
+        num_wrap.pack(side='right')
+
+        self.count_entry = tk.Entry(num_wrap, width=3, justify='center',
+                                     bg=CHIP_BG, fg=TEXT, relief='flat',
+                                     font=('Microsoft YaHei', 11, 'bold'),
+                                     insertbackground=TEXT)
+        self.count_entry.insert(0, '1')
+        self.count_entry.pack(side='left', padx=(8, 4), pady=4)
+        self.count_entry.bind('<Button-1>', self._open_numpad)
+
+        arrows = tk.Frame(num_wrap, bg=CHIP_BG)
+        arrows.pack(side='left')
+
+        up = tk.Label(arrows, text="▲", bg=CHIP_BG, fg=ACCENT,
+                       font=('Microsoft YaHei', 6), cursor='hand2', padx=3)
+        up.pack()
+        up.bind('<Button-1>', lambda e: self._nudge(+1))
+
+        down = tk.Label(arrows, text="▼", bg=CHIP_BG, fg=ACCENT,
+                         font=('Microsoft YaHei', 6), cursor='hand2', padx=3)
+        down.pack()
+        down.bind('<Button-1>', lambda e: self._nudge(-1))
+
+        # 候选人数
+        pool_row = tk.Frame(f, bg=ACCENT, height=38)
+        pool_row.pack(fill='x', padx=12, pady=(4, 0))
+        pool_row.pack_propagate(False)
+
+        tk.Label(pool_row, text="当前候选", fg="#eaf1f6", bg=ACCENT,
+                 font=('Microsoft YaHei', 10, 'bold')).pack(side='left', padx=12)
+        self.pool_count_label = tk.Label(pool_row, text="0 人", fg="#ffffff", bg=ACCENT,
+                                          font=('Microsoft YaHei', 12, 'bold'))
+        self.pool_count_label.pack(side='right', padx=12)
+
         # 抽取按钮
-        self.draw_btn = tk.Button(f, text="开 始 抽 取", command=self.start_draw,
-                                   bg=GOLD, fg='#3b2500',
-                                   activebackground=GOLD_HOVER, activeforeground='#3b2500',
+        self.draw_btn = tk.Button(f, text="开 始 抽 取", command=self.on_draw_click,
+                                   bg=SMOKE, fg="#ffffff",
+                                   activebackground=SMOKE_HOVER, activeforeground="#ffffff",
                                    relief='flat', bd=0, cursor='hand2',
                                    font=('Microsoft YaHei', 14, 'bold'))
-        self.draw_btn.pack(fill='x', padx=12, ipady=12)
+        self.draw_btn.pack(fill='x', padx=12, pady=(14, 0), ipady=14)
 
         # 底部状态栏
         bottom = tk.Frame(f, bg=BG)
@@ -324,14 +393,13 @@ class App:
     # ------------------------------------------------------------
     def _build_collapsed(self):
         f = self.collapsed_frame
-        f.configure(bg=ACCENT)
+        f.configure(bg=ACCENT_LT)
 
-        self.arrow_label = tk.Label(f, text="◀", bg=ACCENT, fg="#04212e",
+        self.arrow_label = tk.Label(f, text="◀", bg=ACCENT_LT, fg="#ffffff",
                                      font=('Microsoft YaHei', 18, 'bold'),
                                      cursor='hand2')
         self.arrow_label.pack(expand=True, fill='both')
 
-        # 鼠标进入 → 悬停一小会儿后自动展开
         for w in (f, self.arrow_label):
             w.bind('<Enter>', self._schedule_expand)
             w.bind('<Leave>', self._cancel_schedule)
@@ -374,13 +442,16 @@ class App:
         y = self.root.winfo_y()
         y = max(50, min(y, self.sh - self.COL_H - 50))
 
-        # 先切换内容再改尺寸，避免闪屏
         self.expanded_frame.pack_forget()
         self.collapsed_frame.pack(fill='both', expand=True)
         self.arrow_label.config(text=arrow)
         self.root.geometry(f"{self.COL_W}x{self.COL_H}+{new_x}+{y}")
         self.root.attributes('-alpha', 0.55)
         self._cancel_schedule()
+
+        # 收起后应用小圆角
+        self.root.after(40, lambda: apply_rounded(
+            self.root, self.COL_W, self.COL_H, RADIUS_COLLAPSED))
 
     def expand(self):
         self._cancel_schedule()
@@ -399,9 +470,12 @@ class App:
         self.collapsed_frame.pack_forget()
         self.expanded_frame.pack(fill='both', expand=True)
         self.root.geometry(f"{self.EXP_W}x{self.EXP_H}+{x}+{y}")
-        self.root.attributes('-alpha', 0.96)
+        self.root.attributes('-alpha', 1.0)
 
-    # 悬停展开
+        # 展开后应用大圆角
+        self.root.after(40, lambda: apply_rounded(
+            self.root, self.EXP_W, self.EXP_H, RADIUS_EXPANDED))
+
     def _schedule_expand(self, e=None):
         self._cancel_schedule()
         self._expand_job = self.root.after(350, self.expand)
@@ -420,10 +494,10 @@ class App:
 
     def _make_chip(self, parent, text, on, command):
         lbl = tk.Label(parent, text=text, cursor='hand2',
-                       font=('Microsoft YaHei', 10),
-                       bg=(CHIP_ON_BG if on else BTN_BG),
-                       fg=(CHIP_ON_FG if on else TEXT),
-                       padx=10, pady=4)
+                       font=('Microsoft YaHei', 9, 'bold'),
+                       bg=(CHIP_ON_BG if on else CHIP_BG),
+                       fg=(CHIP_ON_FG if on else CHIP_TEXT),
+                       padx=10, pady=3)
         lbl.pack(side='left', padx=(0, 5), pady=2)
         lbl.bind('<Button-1>', lambda e: command())
         return lbl
@@ -444,11 +518,14 @@ class App:
 
         # 选科
         self._clear_frame(self.subject_row)
-        all_combos = {s['combo'] for s in self.students if s.get('combo')}
-        if all_combos:
-            std = [c for c in SUBJECT_COMBOS if c in all_combos]
-            extra = sorted(all_combos - set(SUBJECT_COMBOS))
-            for c in std + extra:
+        seen = []
+        s_set = set()
+        for s in self.students:
+            c = s.get('combo', '')
+            if c and c not in s_set:
+                s_set.add(c); seen.append(c)
+        if seen:
+            for c in seen:
                 on = c in self.filters['subjects']
                 def cmd(c=c):
                     if c in self.filters['subjects']: self.filters['subjects'].discard(c)
@@ -476,10 +553,6 @@ class App:
                      font=('Microsoft YaHei', 9)).pack(side='left')
 
     def _get_pool(self):
-        """
-        候选池 = 满足当前筛选条件的所有学生
-        （包括被屏蔽的学生，所以界面显示不会异常）
-        """
         f = self.filters
         out = []
         for s in self.students:
@@ -491,74 +564,162 @@ class App:
 
     def _update_status(self):
         pool = self._get_pool()
-        self.status_label.config(text=f"花名册 {len(self.students)} 人 · 候选 {len(pool)} 人")
+        self.pool_count_label.config(text=f"{len(pool)} 人")
+        self.status_label.config(text=f"花名册 {len(self.students)} 人")
+
+    # ------------------------------------------------------------
+    #  数字框 + 小键盘
+    # ------------------------------------------------------------
+    def _nudge(self, delta):
+        try: v = int(self.pad_buffer)
+        except Exception: v = 1
+        v = max(1, min(60, v + delta))
+        self.pad_buffer = str(v)
+        self._render_pad()
+
+    def _render_pad(self):
+        self.count_entry.delete(0, 'end')
+        self.count_entry.insert(0, self.pad_buffer)
+        try:
+            v = int(self.pad_buffer)
+            self.count = max(1, min(60, v))
+        except Exception:
+            self.count = 1
+
+    def _open_numpad(self, event=None):
+        if self.drawing:
+            messagebox.showinfo("提示", "抽奖中不能改人数"); return
+        self.pad_buffer = self.count_entry.get() or '1'
+        self._show_numpad_window()
+
+    def _show_numpad_window(self):
+        if self._numpad_win is not None:
+            try: self._numpad_win.destroy()
+            except Exception: pass
+
+        win = tk.Toplevel(self.root)
+        self._numpad_win = win
+        win.overrideredirect(True)
+        win.attributes('-topmost', True)
+        win.configure(bg=ACCENT)
+
+        x = self.root.winfo_x() + self.EXP_W - 200
+        y = self.root.winfo_y() + 280
+        if x < 10: x = 10
+        if x + 180 > self.sw: x = self.sw - 190
+        if y + 260 > self.sh: y = self.sh - 270
+        win.geometry(f"180x260+{x}+{y}")
+
+        grid = tk.Frame(win, bg=ACCENT)
+        grid.pack(expand=True, fill='both', padx=6, pady=6)
+
+        def press(k):
+            if k == 'ok':
+                self._render_pad()
+                win.destroy()
+                self._numpad_win = None
+                return
+            if k == 'del':
+                self.pad_buffer = self.pad_buffer[:-1]
+            elif k == 'clr':
+                self.pad_buffer = ''
+            else:
+                if self.pad_buffer == '0': self.pad_buffer = ''
+                if len(self.pad_buffer) < 2:
+                    self.pad_buffer += k
+            # 实时同步到主数字框
+            self.count_entry.delete(0, 'end')
+            self.count_entry.insert(0, self.pad_buffer)
+            try:
+                v = int(self.pad_buffer)
+                self.count = max(1, min(60, v))
+            except Exception:
+                self.count = 1
+
+        keys = [
+            ['1','2','3'],
+            ['4','5','6'],
+            ['7','8','9'],
+            ['del','0','clr'],
+        ]
+        for row in keys:
+            r = tk.Frame(grid, bg=ACCENT); r.pack(fill='x', pady=2)
+            for k in row:
+                txt = '←' if k=='del' else ('C' if k=='clr' else k)
+                lbl = tk.Label(r, text=txt, bg=CARD, fg=ACCENT,
+                               font=('Microsoft YaHei', 13, 'bold'),
+                               width=4, height=2, cursor='hand2')
+                lbl.pack(side='left', padx=2)
+                lbl.bind('<Button-1>', lambda e, k=k: press(k))
+
+        ok = tk.Label(grid, text="确定", bg=ACCENT_LT, fg="#ffffff",
+                      font=('Microsoft YaHei', 12, 'bold'), height=2, cursor='hand2')
+        ok.pack(fill='x', pady=(4, 0))
+        ok.bind('<Button-1>', lambda e: press('ok'))
+
+        # 小键盘也做圆角
+        win.after(50, lambda: apply_rounded(win, 180, 260, 12))
 
     # ------------------------------------------------------------
     #  抽取
     # ------------------------------------------------------------
-    def start_draw(self):
-        if self.drawing: return
+    def on_draw_click(self):
+        if self.drawing: self._stop_rolling()
+        else: self._start_rolling()
+
+    def _start_rolling(self):
         if not self.students:
             messagebox.showinfo("提示", "请先从「⚙ 设置」中导入花名册"); return
-
-        # 滚动池 = 全部候选（含屏蔽者）；最终抽取池 = 候选 - 屏蔽者
-        roll_pool = self._get_pool()
-        draw_pool = [s for s in roll_pool if not is_blocked(s)]
-
-        if not roll_pool:
+        self._roll_pool = self._get_pool()
+        self._pending_pool = [s for s in self._roll_pool if not is_blocked(s)]
+        if not self._roll_pool:
             messagebox.showinfo("提示", "当前筛选条件下没有学生"); return
-        if not draw_pool:
+        if not self._pending_pool:
             messagebox.showinfo("提示", "当前筛选条件下没有可抽取的学生"); return
 
-        # 关键：最终结果只从 draw_pool 里选
-        n = min(self.count, len(draw_pool))
-        self._final_picks = random.sample(draw_pool, n)
-
-        # 滚动动画用 roll_pool，所以赖韦宇会闪现
-        self._roll_pool = roll_pool
-
         self.drawing = True
-        self.draw_btn.config(state='disabled', text='抽 取 中…')
-        self._roll_step = 0
-        self._roll_do()
+        self.draw_btn.config(text="停 止 抽 取", bg=DANGER,
+                             activebackground="#b91c1c")
+        self._tick()
 
-    def _roll_do(self):
-        if self._roll_step >= self._roll_total:
-            # 落定：显示最终结果（永远不会是屏蔽者）
-            names = '  '.join(p['name'] for p in self._final_picks)
-            n = len(self._final_picks)
-            fs = 22 if n == 1 else (15 if n <= 3 else 11)
-            self.result_label.config(text=names, fg=GOLD,
-                                     font=('Microsoft YaHei', fs, 'bold'))
-            self.drawing = False
-            self.draw_btn.config(state='normal', text='开 始 抽 取')
-            return
-
-        # 滚动中：从 roll_pool 随机闪（所以赖韦宇会出现）
+    def _tick(self):
+        if not self.drawing: return
         n = min(self.count, len(self._roll_pool))
         picks = random.sample(self._roll_pool, n)
         names = '  '.join(p['name'] for p in picks)
         fs = 22 if n == 1 else (15 if n <= 3 else 11)
-        self.result_label.config(text=names, fg=ACCENT,
-                                 font=('Microsoft YaHei', fs, 'bold'))
-        self._roll_step += 1
-        t = self._roll_step / self._roll_total
-        delay = 45 + int(190 * (t ** 3))
-        self.root.after(delay, self._roll_do)
+        self.result_label.config(text=names, fg="#ffffff",
+                                  font=('Microsoft YaHei', fs, 'bold'))
+        self._roll_timer = self.root.after(70, self._tick)
+
+    def _stop_rolling(self):
+        self.drawing = False
+        if self._roll_timer:
+            try: self.root.after_cancel(self._roll_timer)
+            except Exception: pass
+            self._roll_timer = None
+        self.draw_btn.config(text="开 始 抽 取", bg=SMOKE,
+                             activebackground=SMOKE_HOVER)
+        n = max(1, min(self.count, len(self._pending_pool)))
+        picks = random.sample(self._pending_pool, n)
+        names = '  '.join(p['name'] for p in picks)
+        fs = 22 if n == 1 else (15 if n <= 3 else 11)
+        self.result_label.config(text=names, fg="#ffffff",
+                                  font=('Microsoft YaHei', fs, 'bold'))
 
     # ------------------------------------------------------------
     #  设置菜单
     # ------------------------------------------------------------
     def show_menu(self, event=None):
         menu = tk.Menu(self.root, tearoff=0, bg=PANEL, fg=TEXT,
-                       activebackground=ACCENT, activeforeground=CHIP_ON_FG,
+                       activebackground=ACCENT, activeforeground="#ffffff",
                        font=('Microsoft YaHei', 10))
         menu.add_command(label="📥  导入花名册 (.xlsx / .csv)", command=self.import_roster)
         menu.add_command(label="🗑  清空花名册", command=self.clear_roster)
         menu.add_separator()
 
         cm = tk.Menu(menu, tearoff=0, bg=PANEL, fg=TEXT,
-                     activebackground=ACCENT, activeforeground=CHIP_ON_FG,
+                     activebackground=ACCENT, activeforeground="#ffffff",
                      font=('Microsoft YaHei', 10))
         for n in [1, 2, 3, 4, 5]:
             cm.add_command(label=f"每次抽 {n} 人", command=lambda n=n: self.set_count(n))
@@ -579,7 +740,10 @@ class App:
         try: menu.tk_popup(event.x_root, event.y_root)
         finally: menu.grab_release()
 
-    def set_count(self, n): self.count = n
+    def set_count(self, n):
+        self.count = n
+        self.pad_buffer = str(n)
+        self._render_pad()
 
     def toggle_autostart(self, enabled):
         if set_autostart(enabled):
@@ -611,7 +775,7 @@ class App:
             save_json(ROSTER_FILE, students)
             self.filters = {'gender': 'all', 'subjects': set(), 'groups': set()}
             self._refresh_filters(); self._update_status()
-            self.result_label.config(text=f"已导入 {len(students)} 人", fg=ACCENT)
+            self.result_label.config(text=f"已导入 {len(students)} 人", fg="#ffffff")
         except Exception as e:
             messagebox.showerror("导入失败", str(e))
 
@@ -629,13 +793,10 @@ class App:
             "【课堂随机点名 · 悬浮窗版】\n\n"
             "· 点右上「◀ 收起」→ 变成屏幕边缘的小箭头\n"
             "· 鼠标移到箭头上 → 自动展开\n"
-            "· 箭头贴在屏幕左/右边缘，跟着窗口位置自动判断\n\n"
+            "· 点「开始抽取」滚动，再点一次停止\n\n"
             "【导入花名册】\n"
             "点「⚙ 设置 → 导入花名册」\n"
-            "表头四列：姓名 | 性别 | 选科 | 小组\n"
-            "· 性别：男 / 女\n"
-            "· 选科：物化生 / 物化地 / 历政生 / 历政地\n"
-            "· 小组：1、2、3（可自定义）\n\n"
+            "表头四列：姓名 | 性别 | 选科 | 小组\n\n"
             "花名册保存在：\n" + str(ROSTER_FILE))
 
     def run(self):
