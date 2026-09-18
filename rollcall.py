@@ -44,6 +44,16 @@ DANGER      = "#ef4444"
 
 SUBJECT_COMBOS = ['物化生', '物化地', '历政生', '历政地']
 
+# ================================================================
+#  ⚠️ 屏蔽名单（内部使用，界面上不做任何提示）
+#
+#  效果：
+#    · 花名册人数、候选人数、筛选按钮 —— 全部照常显示，看不出异常
+#    · 滚动动画中 —— 赖韦宇【会】出现，让全班看到他"在参与"
+#    · 最终结果 —— 【永远不会】是赖韦宇
+# ================================================================
+BLOCKED_NAMES = {'赖韦宇'}
+
 # ============ 工具 ============
 def normalize_combo(raw):
     if not raw: return ''
@@ -57,6 +67,11 @@ def normalize_combo(raw):
     if hasL and hasZ and hasS: return '历政生'
     if hasL and hasZ and hasD: return '历政地'
     return s
+
+def is_blocked(student):
+    """判断某学生是否在屏蔽名单中（按姓名匹配，忽略首尾空格）"""
+    name = str(student.get('name', '')).strip()
+    return name in BLOCKED_NAMES
 
 def load_json(path, default):
     if path.exists():
@@ -199,7 +214,8 @@ class App:
         self._final_picks = []
         self._roll_step = 0
         self._roll_total = 26
-        self._roll_pool = []
+        self._roll_pool = []        # 滚动用（含被屏蔽者）
+        self._draw_pool = []        # 抽取用（不含被屏蔽者）
 
         # 主容器
         self.container = tk.Frame(self.root, bg=BG)
@@ -460,6 +476,10 @@ class App:
                      font=('Microsoft YaHei', 9)).pack(side='left')
 
     def _get_pool(self):
+        """
+        候选池 = 满足当前筛选条件的所有学生
+        （包括被屏蔽的学生，所以界面显示不会异常）
+        """
         f = self.filters
         out = []
         for s in self.students:
@@ -480,19 +500,31 @@ class App:
         if self.drawing: return
         if not self.students:
             messagebox.showinfo("提示", "请先从「⚙ 设置」中导入花名册"); return
-        pool = self._get_pool()
-        if not pool:
+
+        # 滚动池 = 全部候选（含屏蔽者）；最终抽取池 = 候选 - 屏蔽者
+        roll_pool = self._get_pool()
+        draw_pool = [s for s in roll_pool if not is_blocked(s)]
+
+        if not roll_pool:
             messagebox.showinfo("提示", "当前筛选条件下没有学生"); return
-        n = min(self.count, len(pool))
-        self._final_picks = random.sample(pool, n)
+        if not draw_pool:
+            messagebox.showinfo("提示", "当前筛选条件下没有可抽取的学生"); return
+
+        # 关键：最终结果只从 draw_pool 里选
+        n = min(self.count, len(draw_pool))
+        self._final_picks = random.sample(draw_pool, n)
+
+        # 滚动动画用 roll_pool，所以赖韦宇会闪现
+        self._roll_pool = roll_pool
+
         self.drawing = True
         self.draw_btn.config(state='disabled', text='抽 取 中…')
         self._roll_step = 0
-        self._roll_pool = pool
         self._roll_do()
 
     def _roll_do(self):
         if self._roll_step >= self._roll_total:
+            # 落定：显示最终结果（永远不会是屏蔽者）
             names = '  '.join(p['name'] for p in self._final_picks)
             n = len(self._final_picks)
             fs = 22 if n == 1 else (15 if n <= 3 else 11)
@@ -501,6 +533,8 @@ class App:
             self.drawing = False
             self.draw_btn.config(state='normal', text='开 始 抽 取')
             return
+
+        # 滚动中：从 roll_pool 随机闪（所以赖韦宇会出现）
         n = min(self.count, len(self._roll_pool))
         picks = random.sample(self._roll_pool, n)
         names = '  '.join(p['name'] for p in picks)
