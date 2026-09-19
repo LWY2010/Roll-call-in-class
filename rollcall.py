@@ -5,12 +5,13 @@
 · 悬浮在 PPT 上也能用
 · 收起后贴在屏幕边缘成半透明小箭头
 · 清空花名册需要输入密码
+· 清除本地配置需要输入密码
 · 支持开机自动启动
 · 密码支持外部重置（配合 reset_password.py）
 · 关闭时彻底释放文件，不会残留进程
-· 筛选按钮点击立即变色（原地更新，不重建）
+· 筛选按钮点击立即变色
 """
-import json, os, random, re, sys, csv, io
+import json, os, random, re, sys, csv, io, shutil
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QPoint, QRectF, QEvent
@@ -188,7 +189,7 @@ def parse_xlsx(path):
 
 
 # ============================================================
-#  圆角容器
+#  圆角容器（背景穿透鼠标）
 # ============================================================
 class RoundedWidget(QWidget):
     def __init__(self, radius=18, bg=BG, parent=None):
@@ -196,6 +197,7 @@ class RoundedWidget(QWidget):
         self.radius = radius
         self.bg_color = QColor(bg)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -223,6 +225,7 @@ class PasswordDialog(QDialog):
         outer.setContentsMargins(0, 0, 0, 0)
 
         self.bg = RoundedWidget(radius=14, bg=PANEL, parent=self)
+        self.bg.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         outer.addWidget(self.bg)
 
         lay = QVBoxLayout(self.bg)
@@ -328,6 +331,7 @@ class NumPad(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.bg = RoundedWidget(radius=10, bg=ACCENT, parent=self)
+        self.bg.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         outer.addWidget(self.bg)
 
         grid = QGridLayout(self.bg)
@@ -407,7 +411,6 @@ class RollCallApp(QWidget):
         self._drag_pos = None
         self._numpad = None
 
-        # 保存每类筛选按钮的引用（原地更新用）
         self.gender_chips = {}
         self.subject_chips = {}
         self.group_chips = {}
@@ -679,19 +682,18 @@ class RollCallApp(QWidget):
                 self._clear_layout(item.layout())
 
     # ============================================================
-    #  筛选按钮：创建一次，之后原地更新颜色
+    #  筛选按钮
     # ============================================================
     def _new_chip(self, text, command):
-        """创建一个未选中状态的筛选按钮"""
         btn = QPushButton(text)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setFixedHeight(30)
+        btn.setAttribute(Qt.WA_AlwaysStackOnTop, True)
         self._apply_chip_style(btn, False, text)
         btn.clicked.connect(command)
         return btn
 
     def _apply_chip_style(self, btn, on, base_text=None):
-        """给一个按钮套上选中/未选中样式"""
         if base_text is None:
             t = btn.text()
             if t.startswith("✓ "):
@@ -730,8 +732,6 @@ class RollCallApp(QWidget):
             """)
 
     def _build_filters(self):
-        """只在程序启动 / 导入 / 清空时调用一次"""
-        # 性别
         self._clear_layout(self.gender_row)
         self.gender_chips = {}
         opts = [('all', '全部')]
@@ -748,7 +748,6 @@ class RollCallApp(QWidget):
             self.gender_row.addWidget(btn)
         self.gender_row.addStretch()
 
-        # 选科
         self._clear_layout(self.subject_row)
         self.subject_chips = {}
         seen, sset = [], set()
@@ -774,7 +773,6 @@ class RollCallApp(QWidget):
             self.subject_row.addWidget(lbl)
         self.subject_row.addStretch()
 
-        # 小组
         self._clear_layout(self.group_row)
         self.group_chips = {}
         groups = sorted({s['group'] for s in self.students if s.get('group')},
@@ -800,7 +798,6 @@ class RollCallApp(QWidget):
         self._update_chip_states()
 
     def _update_chip_states(self):
-        """只更新按钮外观，不重建控件"""
         for v, btn in self.gender_chips.items():
             self._apply_chip_style(btn, self.filters['gender'] == v)
         for c, btn in self.subject_chips.items():
@@ -964,6 +961,7 @@ class RollCallApp(QWidget):
 
         menu.addAction("📥  导入花名册 (.xlsx / .csv)", self.import_roster)
         menu.addAction("🗑  清空花名册（需密码）", self.clear_roster)
+        menu.addAction("💣  清除本地配置（需密码）", self.clear_config)
         menu.addSeparator()
 
         sub = menu.addMenu(f"🎯  每次抽取人数（当前 {self.count}）")
@@ -1004,7 +1002,7 @@ class RollCallApp(QWidget):
     def set_count(self, n):
         self.count = n; self.pad_buffer = str(n); self._render_pad()
 
-    # ---------------- 导入 / 清空 ----------------
+    # ---------------- 导入 / 清空 / 清配置 ----------------
     def import_roster(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "选择花名册文件", "",
@@ -1050,6 +1048,48 @@ class RollCallApp(QWidget):
         self.result_label.setText("花名册已清空")
         QMessageBox.information(self, "已清空", "花名册已清空。")
 
+    def clear_config(self):
+        """清除本地所有配置文件（需要密码）"""
+        dlg = PasswordDialog(self)
+        dlg.move(self.geometry().center() - QPoint(150, 100))
+        if not dlg.exec() or not dlg.result_ok:
+            return
+
+        # 二次确认
+        r = QMessageBox.question(
+            self, "确认",
+            "确定要清除所有本地配置吗？\n\n"
+            "包括：\n"
+            "· 花名册数据\n"
+            "· 自定义密码\n\n"
+            "清除后需要重新导入花名册，密码恢复为默认。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if r != QMessageBox.Yes:
+            return
+
+        # 删除配置文件
+        try:
+            if ROSTER_FILE.exists():
+                ROSTER_FILE.unlink()
+            if CONFIG_FILE.exists():
+                CONFIG_FILE.unlink()
+        except Exception as e:
+            QMessageBox.warning(self, "错误",
+                f"删除文件失败：{e}\n\n请手动删除：\n{DATA_DIR}")
+            return
+
+        # 清空内存状态
+        self.students = []
+        self.filters = {'gender': 'all', 'subjects': set(), 'groups': set()}
+        self._build_filters()
+        self._update_status()
+        self.result_label.setText("配置已清除")
+
+        QMessageBox.information(self, "已清除", "本地配置已全部清除。\n\n程序即将关闭。")
+        QTimer.singleShot(300, QApplication.quit)
+
     def show_help(self):
         QMessageBox.information(self, "使用说明",
             "【课堂随机点名 · 悬浮窗版】\n\n"
@@ -1061,21 +1101,30 @@ class RollCallApp(QWidget):
             "表头四列：姓名 | 性别 | 选科 | 小组\n\n"
             "【清空花名册】\n"
             "需要输入管理密码\n\n"
+            "【清除本地配置】\n"
+            "删除花名册和密码，恢复默认状态\n"
+            "需要输入管理密码\n\n"
             "花名册保存在：\n" + str(ROSTER_FILE))
 
     # ---------------- 拖动 / 收起 ----------------
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton and e.position().y() < 40:
+        pos = e.position()
+        if e.button() == Qt.LeftButton and pos.y() < 40 and pos.x() < 120:
             self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
             e.accept()
+        else:
+            super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
         if self._drag_pos and e.buttons() & Qt.LeftButton:
             self.move(e.globalPosition().toPoint() - self._drag_pos)
             e.accept()
+        else:
+            super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
+        super().mouseReleaseEvent(e)
 
     def closeEvent(self, event):
         self.drawing = False
