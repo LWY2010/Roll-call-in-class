@@ -8,6 +8,7 @@
 · 支持开机自动启动
 · 密码支持外部重置（配合 reset_password.py）
 · 关闭时彻底释放文件，不会残留进程
+· 筛选按钮点击立即变色
 """
 import json, os, random, re, sys, csv, io
 from pathlib import Path
@@ -48,9 +49,9 @@ SMOKE       = "#5c6f82"
 SMOKE_HOVER = "#4a5a6b"
 GREEN       = "#2f855a"
 DANGER      = "#c53030"
-CHIP_BG     = "#dbe6ee"
-CHIP_BORDER = "#c5d4e0"
-CHIP_TEXT   = "#8fa9c2"
+CHIP_BG     = "#ffffff"
+CHIP_BORDER = "#b0c4d4"
+CHIP_TEXT   = "#4a6884"
 CHIP_ON_BG  = "#2c5282"
 CHIP_ON_FG  = "#ffffff"
 CHIP_ON_BORDER = "#1a365d"
@@ -269,12 +270,12 @@ class PasswordDialog(QDialog):
         cancel.setCursor(Qt.PointingHandCursor)
         cancel.setStyleSheet(f"""
             QPushButton {{
-                background:{CHIP_BG}; color:{TEXT};
+                background:#dbe6ee; color:{TEXT};
                 border:none; border-radius:8px;
                 padding:8px 18px;
                 font-family:'Microsoft YaHei'; font-size:10pt; font-weight:bold;
             }}
-            QPushButton:hover {{ background:#b0c4d4; }}
+            QPushButton:hover {{ background:#c5d4e0; }}
         """)
         cancel.clicked.connect(self.reject)
 
@@ -534,7 +535,7 @@ class RollCallApp(QWidget):
         num_box.setFixedHeight(32)
         num_box.setStyleSheet(f"""
             QFrame {{
-                background:{CHIP_BG};
+                background:#ffffff;
                 border:1px solid {CHIP_BORDER};
                 border-radius:8px;
             }}
@@ -666,59 +667,69 @@ class RollCallApp(QWidget):
         lbl.setStyleSheet(f"color:{ACCENT}; background:transparent;")
         return lbl
 
+    # ★★★ 修复：立即移除旧控件，避免延迟删除导致点击不变色 ★★★
     def _clear_layout(self, layout):
         while layout.count():
             item = layout.takeAt(0)
             w = item.widget()
             if w is not None:
-                w.deleteLater()
+                w.setParent(None)       # ← 关键：立即从界面移除
+                w.deleteLater()         # ← 稍后释放资源
+            elif item.layout() is not None:
+                self._clear_layout(item.layout())
 
-    # ★★★ 筛选按钮：选中态明显不同 ★★★
+    # 筛选按钮：白底（未选中）vs 深海蓝底+✓（选中）
     def _make_chip(self, text, on, command):
         btn = QPushButton(("✓ " if on else "") + text)
         btn.setCursor(Qt.PointingHandCursor)
-        btn.setFixedHeight(28)
+        btn.setFixedHeight(30)
         if on:
-            # 选中：深海蓝底 + 纯白字 + 深蓝边框
             btn.setStyleSheet(f"""
                 QPushButton {{
-                    background:{CHIP_ON_BG}; color:{CHIP_ON_FG};
+                    background:{CHIP_ON_BG};
+                    color:{CHIP_ON_FG};
                     border:2px solid {CHIP_ON_BORDER};
-                    border-radius:14px;
-                    padding:0 12px;
+                    border-radius:15px;
+                    padding:0 14px;
                     font-family:'Microsoft YaHei'; font-size:9pt; font-weight:bold;
                 }}
                 QPushButton:hover {{ background:{ACCENT_LT}; }}
             """)
         else:
-            # 未选中：极浅灰蓝底 + 淡蓝字
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background:{CHIP_BG}; color:{CHIP_TEXT};
-                    border:1px solid {CHIP_BORDER};
-                    border-radius:14px;
+            btn.setStyleSheet("""
+                QPushButton {
+                    background:#ffffff;
+                    color:#4a6884;
+                    border:1px solid #b0c4d4;
+                    border-radius:15px;
                     padding:0 14px;
                     font-family:'Microsoft YaHei'; font-size:9pt; font-weight:bold;
-                }}
-                QPushButton:hover {{ background:#cddde8; color:#5a7d9e; }}
+                }
+                QPushButton:hover {
+                    background:#f0f6fa;
+                    border-color:#8fa9c2;
+                    color:#2c5282;
+                }
             """)
         btn.clicked.connect(command)
         return btn
 
     def _refresh_filters(self):
+        # 性别
         self._clear_layout(self.gender_row)
         opts = [('all', '全部')]
         genders = {s.get('gender', '') for s in self.students} - {''}
         if '男' in genders: opts.append(('男', '男生'))
         if '女' in genders: opts.append(('女', '女生'))
         for v, label in opts:
-            on = self.filters['gender'] == v
             def cmd(v=v):
                 self.filters['gender'] = v
                 self._refresh_filters(); self._update_status()
+            on = (self.filters['gender'] == v)
             self.gender_row.addWidget(self._make_chip(label, on, cmd))
         self.gender_row.addStretch()
 
+        # 选科
         self._clear_layout(self.subject_row)
         seen, sset = [], set()
         for s in self.students:
@@ -727,11 +738,13 @@ class RollCallApp(QWidget):
                 sset.add(c); seen.append(c)
         if seen:
             for c in seen:
-                on = c in self.filters['subjects']
                 def cmd(c=c):
-                    if c in self.filters['subjects']: self.filters['subjects'].discard(c)
-                    else: self.filters['subjects'].add(c)
+                    if c in self.filters['subjects']:
+                        self.filters['subjects'].discard(c)
+                    else:
+                        self.filters['subjects'].add(c)
                     self._refresh_filters(); self._update_status()
+                on = (c in self.filters['subjects'])
                 self.subject_row.addWidget(self._make_chip(c, on, cmd))
         else:
             lbl = QLabel("（无选科信息）")
@@ -739,16 +752,19 @@ class RollCallApp(QWidget):
             self.subject_row.addWidget(lbl)
         self.subject_row.addStretch()
 
+        # 小组
         self._clear_layout(self.group_row)
         groups = sorted({s['group'] for s in self.students if s.get('group')},
                         key=lambda x: (float(x) if x.replace('.', '', 1).isdigit() else 999, x))
         if groups:
             for g in groups:
-                on = g in self.filters['groups']
                 def cmd(g=g):
-                    if g in self.filters['groups']: self.filters['groups'].discard(g)
-                    else: self.filters['groups'].add(g)
+                    if g in self.filters['groups']:
+                        self.filters['groups'].discard(g)
+                    else:
+                        self.filters['groups'].add(g)
                     self._refresh_filters(); self._update_status()
+                on = (g in self.filters['groups'])
                 self.group_row.addWidget(self._make_chip(g, on, cmd))
         else:
             lbl = QLabel("（无小组信息）")
@@ -843,7 +859,6 @@ class RollCallApp(QWidget):
             }}
             QPushButton:hover {{ background:#a82020; }}
         """)
-        # 启动计时器
         if self._roll_timer is None:
             self._roll_timer = QTimer(self)
             self._roll_timer.timeout.connect(self._tick)
@@ -1024,7 +1039,6 @@ class RollCallApp(QWidget):
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
 
-    # ★★★ 关闭时彻底释放 ★★★
     def closeEvent(self, event):
         self.drawing = False
         if self._roll_timer:
@@ -1069,7 +1083,9 @@ class RollCallApp(QWidget):
                 while old.count():
                     it = old.takeAt(0)
                     w = it.widget()
-                    if w: w.deleteLater()
+                    if w:
+                        w.setParent(None)
+                        w.deleteLater()
             lay = QVBoxLayout(self.bg)
             lay.setContentsMargins(0, 0, 0, 0)
             arrow = QLabel("◀" if self.x() > self.sw // 2 else "▶")
@@ -1090,7 +1106,9 @@ class RollCallApp(QWidget):
                 while old.count():
                     it = old.takeAt(0)
                     w = it.widget()
-                    if w: w.deleteLater()
+                    if w:
+                        w.setParent(None)
+                        w.deleteLater()
             self._build_ui()
 
     def eventFilter(self, obj, e):
