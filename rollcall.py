@@ -1,9 +1,27 @@
 """
-课堂随机点名 · 悬浮窗版（画布圆角）
+课堂随机点名 · 悬浮窗版（PySide6 圆角真无边框）
+================================================
+· 真圆角 + 真透明，不再有裁剪问题
+· 悬浮在 PPT 上也能用
+· 收起后贴在屏幕边缘成半透明小箭头
+· 清空花名册需要输入密码（默认 888888）
+· 花名册保存在用户目录
+
+依赖：
+    pip install PySide6 openpyxl
+打包：
+    pyinstaller -F -w -n "课堂点名" rollcall.py
 """
-import json, os, random, re, sys, csv, io, tkinter as tk
+import json, os, random, re, sys, csv, io
 from pathlib import Path
-from tkinter import filedialog, messagebox
+
+from PySide6.QtCore import Qt, QTimer, QPoint, QRectF, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QFont, QColor, QPainter, QPainterPath, QBrush, QPen, QIcon
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QFrame, QHBoxLayout, QVBoxLayout,
+    QGridLayout, QLineEdit, QDialog, QMenu, QFileDialog, QMessageBox,
+    QGraphicsDropShadowEffect, QSizePolicy, QSpacerItem
+)
 
 try:
     from openpyxl import load_workbook
@@ -11,12 +29,16 @@ try:
 except ImportError:
     HAS_XLSX = False
 
+# ============ 路径 ============
 APP_NAME = "ClassRollCall"
 DATA_DIR = Path(os.environ.get('APPDATA', Path.home())) / APP_NAME
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ROSTER_FILE = DATA_DIR / "roster.json"
 
-# 配色
+# ============ 密码 ============
+CLEAR_PASSWORD = "888888"      # ★ 清空密码，改这里
+
+# ============ 配色 ============
 BG          = "#c5d4e0"
 PANEL       = "#dde8f0"
 CARD        = "#2c5282"
@@ -35,9 +57,13 @@ CHIP_TEXT   = "#1a365d"
 CHIP_ON_BG  = "#2c5282"
 CHIP_ON_FG  = "#ffffff"
 
+# ============ 屏蔽名单 ============
 BLOCKED_NAMES = {'赖韦宇'}
 
 
+# ============================================================
+#  工具
+# ============================================================
 def clean_subject(raw):
     return str(raw or '').strip()
 
@@ -119,57 +145,207 @@ def parse_xlsx(path):
     return rows
 
 
-def get_exe_path():
-    return sys.executable if getattr(sys, 'frozen', False) else None
+# ============================================================
+#  圆角容器
+# ============================================================
+class RoundedWidget(QWidget):
+    """一个带圆角和阴影的容器"""
+    def __init__(self, radius=18, bg=BG, parent=None):
+        super().__init__(parent)
+        self.radius = radius
+        self.bg_color = QColor(bg)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
 
-def is_autostart_enabled():
-    if sys.platform != 'win32': return False
-    try:
-        import winreg
-        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
-        try:
-            winreg.QueryValueEx(k, APP_NAME); return True
-        except FileNotFoundError: return False
-        finally: winreg.CloseKey(k)
-    except Exception: return False
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        path = QPainterPath()
+        rect = QRectF(0, 0, self.width(), self.height())
+        path.addRoundedRect(rect, self.radius, self.radius)
+        painter.fillPath(path, QBrush(self.bg_color))
+        painter.end()
 
-def set_autostart(enabled):
-    if sys.platform != 'win32': return False
-    exe = get_exe_path()
-    if not exe: return False
-    try:
-        import winreg
-        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
-        if enabled:
-            winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ, f'"{exe}"')
+
+# ============================================================
+#  密码对话框
+# ============================================================
+class PasswordDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.setFixedSize(300, 180)
+        self.result_ok = False
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        self.bg = RoundedWidget(radius=14, bg=PANEL, parent=self)
+        outer.addWidget(self.bg)
+
+        lay = QVBoxLayout(self.bg)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(12)
+
+        title = QLabel("请输入管理密码")
+        title.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        title.setStyleSheet(f"color:{TEXT}; background:transparent;")
+        title.setAlignment(Qt.AlignCenter)
+        lay.addWidget(title)
+
+        self.edit = QLineEdit()
+        self.edit.setEchoMode(QLineEdit.Password)
+        self.edit.setFont(QFont("Microsoft YaHei", 12))
+        self.edit.setStyleSheet(f"""
+            QLineEdit {{
+                background:#ffffff;
+                color:{TEXT};
+                border:2px solid {CHIP_BORDER};
+                border-radius:8px;
+                padding:8px 12px;
+            }}
+            QLineEdit:focus {{
+                border-color:{ACCENT};
+            }}
+        """)
+        self.edit.returnPressed.connect(self.try_ok)
+        lay.addWidget(self.edit)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        cancel = QPushButton("取消")
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setStyleSheet(f"""
+            QPushButton {{
+                background:{CHIP_BG}; color:{TEXT};
+                border:none; border-radius:8px;
+                padding:8px 18px;
+                font-family:'Microsoft YaHei'; font-size:10pt; font-weight:bold;
+            }}
+            QPushButton:hover {{ background:#b0c4d4; }}
+        """)
+        cancel.clicked.connect(self.reject)
+
+        ok = QPushButton("确定")
+        ok.setCursor(Qt.PointingHandCursor)
+        ok.setStyleSheet(f"""
+            QPushButton {{
+                background:{ACCENT}; color:#ffffff;
+                border:none; border-radius:8px;
+                padding:8px 18px;
+                font-family:'Microsoft YaHei'; font-size:10pt; font-weight:bold;
+            }}
+            QPushButton:hover {{ background:{ACCENT_LT}; }}
+        """)
+        ok.clicked.connect(self.try_ok)
+
+        btn_row.addStretch()
+        btn_row.addWidget(cancel)
+        btn_row.addWidget(ok)
+        lay.addLayout(btn_row)
+
+        self.edit.setFocus()
+
+    def try_ok(self):
+        if self.edit.text() == CLEAR_PASSWORD:
+            self.result_ok = True
+            self.accept()
         else:
-            try: winreg.DeleteValue(k, APP_NAME)
-            except FileNotFoundError: pass
-        winreg.CloseKey(k); return True
-    except Exception: return False
+            QMessageBox.warning(self, "密码错误", "密码不正确，请重新输入。")
+            self.edit.clear()
+            self.edit.setFocus()
+
+    def mousePressEvent(self, e):
+        self._drag = e.globalPosition().toPoint()
+        self._orig = self.pos()
+
+    def mouseMoveEvent(self, e):
+        if hasattr(self, "_drag"):
+            delta = e.globalPosition().toPoint() - self._drag
+            self.move(self._orig + delta)
 
 
-class App:
+# ============================================================
+#  数字键盘
+# ============================================================
+class NumPad(QWidget):
+    def __init__(self, callback, parent=None):
+        super().__init__(parent)
+        self.callback = callback
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setFixedSize(180, 260)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.bg = RoundedWidget(radius=10, bg=ACCENT, parent=self)
+        outer.addWidget(self.bg)
+
+        grid = QGridLayout(self.bg)
+        grid.setContentsMargins(6, 6, 6, 6)
+        grid.setSpacing(4)
+
+        keys = [
+            ('1',0,0),('2',0,1),('3',0,2),
+            ('4',1,0),('5',1,1),('6',1,2),
+            ('7',2,0),('8',2,1),('9',2,2),
+            ('←',3,0),('0',3,1),('C',3,2),
+        ]
+        for txt, r, c in keys:
+            b = QPushButton(txt)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedHeight(46)
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    background:{CARD}; color:#ffffff;
+                    border:none; border-radius:8px;
+                    font-family:'Microsoft YaHei'; font-size:13pt; font-weight:bold;
+                }}
+                QPushButton:hover {{ background:#3a6fa8; }}
+                QPushButton:pressed {{ background:{ACCENT_LT}; }}
+            """)
+            b.clicked.connect(lambda _, t=txt: self.on_press(t))
+            grid.addWidget(b, r, c)
+
+        ok = QPushButton("确定")
+        ok.setCursor(Qt.PointingHandCursor)
+        ok.setFixedHeight(40)
+        ok.setStyleSheet(f"""
+            QPushButton {{
+                background:{ACCENT_LT}; color:#ffffff;
+                border:none; border-radius:8px;
+                font-family:'Microsoft YaHei'; font-size:11pt; font-weight:bold;
+            }}
+            QPushButton:hover {{ background:{ACCENT}; }}
+        """)
+        ok.clicked.connect(lambda: self.on_press('OK'))
+        grid.addWidget(ok, 4, 0, 1, 3)
+
+    def on_press(self, k):
+        if k == 'OK':
+            self.callback('OK'); self.close()
+        elif k == '←':
+            self.callback('DEL')
+        elif k == 'C':
+            self.callback('CLR')
+        else:
+            self.callback(k)
+
+
+# ============================================================
+#  主窗口
+# ============================================================
+class RollCallApp(QWidget):
     EXP_W, EXP_H = 360, 620
     COL_W, COL_H = 28, 74
 
     def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("课堂随机点名")
-        self.root.overrideredirect(True)
-        self.root.attributes('-topmost', True)
-        self.root.configure(bg=BG)
-
-        self.sw = self.root.winfo_screenwidth()
-        self.sh = self.root.winfo_screenheight()
-
-        self.collapsed = False
-        self.saved_pos = None
-        self._expand_job = None
-        self._drag_x = self._drag_y = 0
-        self._numpad_win = None
+        super().__init__()
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setFixedSize(self.EXP_W, self.EXP_H)
 
         self.students = load_json(ROSTER_FILE, [])
         self.filters = {'gender': 'all', 'subjects': set(), 'groups': set()}
@@ -179,233 +355,308 @@ class App:
         self._roll_timer = None
         self._pending_pool = []
         self._roll_pool = []
+        self.collapsed = False
+        self.saved_pos = None
+        self._drag_pos = None
 
-        self.container = tk.Frame(self.root, bg=BG)
-        self.container.pack(fill='both', expand=True)
-        self.expanded_frame = tk.Frame(self.container, bg=BG)
-        self.collapsed_frame = tk.Frame(self.container, bg=BG)
+        # 屏幕位置
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.sw, self.sh = screen.width(), screen.height()
+        self.move(self.sw - self.EXP_W - 40, 80)
 
-        self._build_expanded()
-        self._build_collapsed()
+        # 主容器（圆角）
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.bg = RoundedWidget(radius=18, bg=BG, parent=self)
+        outer.addWidget(self.bg)
 
-        init_x = self.sw - self.EXP_W - 40
-        init_y = 80
-        self.root.geometry(f"{self.EXP_W}x{self.EXP_H}+{init_x}+{init_y}")
-        self.expanded_frame.pack(fill='both', expand=True)
+        self._build_ui()
+
+    # ---------------- UI ----------------
+    def _build_ui(self):
+        main = QVBoxLayout(self.bg)
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(0)
+
+        # ============ 标题栏 ============
+        title = QFrame()
+        title.setFixedHeight(40)
+        title.setStyleSheet(f"background:{PANEL}; border-top-left-radius:18px; border-top-right-radius:18px;")
+        tlay = QHBoxLayout(title)
+        tlay.setContentsMargins(16, 0, 10, 0)
+
+        self.title_label = QLabel("课堂随机点名")
+        self.title_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        self.title_label.setStyleSheet(f"color:{TEXT}; background:transparent;")
+        tlay.addWidget(self.title_label)
+        tlay.addStretch()
+
+        collapse_btn = QPushButton("◀ 收起")
+        collapse_btn.setCursor(Qt.PointingHandCursor)
+        collapse_btn.setStyleSheet(f"""
+            QPushButton {{
+                color:{MUTED}; background:transparent;
+                border:none; padding:4px 8px;
+                font-family:'Microsoft YaHei'; font-size:9pt;
+            }}
+            QPushButton:hover {{ color:{ACCENT}; }}
+        """)
+        collapse_btn.clicked.connect(self.collapse)
+        tlay.addWidget(collapse_btn)
+
+        close_btn = QPushButton("✕")
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setFixedSize(28, 28)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                color:{MUTED}; background:transparent;
+                border:none;
+                font-family:'Microsoft YaHei'; font-size:11pt;
+            }}
+            QPushButton:hover {{ color:{DANGER}; }}
+        """)
+        close_btn.clicked.connect(self.close)
+        tlay.addWidget(close_btn)
+
+        main.addWidget(title)
+
+        # ============ 内容区 ============
+        content = QWidget()
+        content.setStyleSheet("background:transparent;")
+        clay = QVBoxLayout(content)
+        clay.setContentsMargins(14, 14, 14, 14)
+        clay.setSpacing(10)
+
+        # 结果卡片
+        self.result_card = QFrame()
+        self.result_card.setFixedHeight(120)
+        self.result_card.setStyleSheet(f"""
+            QFrame {{
+                background:{CARD};
+                border-radius:14px;
+            }}
+        """)
+        rlay = QVBoxLayout(self.result_card)
+        rlay.setContentsMargins(0, 0, 0, 0)
+        self.result_label = QLabel("尚未导入花名册")
+        self.result_label.setAlignment(Qt.AlignCenter)
+        self.result_label.setFont(QFont("Microsoft YaHei", 22, QFont.Bold))
+        self.result_label.setStyleSheet(f"color:#ffffff; background:transparent;")
+        rlay.addWidget(self.result_label)
+        clay.addWidget(self.result_card)
+
+        # 性别
+        clay.addWidget(self._section_label("性别"))
+        self.gender_row = QHBoxLayout()
+        self.gender_row.setSpacing(6)
+        self.gender_row.setContentsMargins(0, 0, 0, 0)
+        gw = QWidget(); gw.setStyleSheet("background:transparent;"); gw.setLayout(self.gender_row)
+        clay.addWidget(gw)
+
+        # 选科
+        clay.addWidget(self._section_label("选科"))
+        self.subject_row = QHBoxLayout()
+        self.subject_row.setSpacing(6)
+        self.subject_row.setContentsMargins(0, 0, 0, 0)
+        sw = QWidget(); sw.setStyleSheet("background:transparent;"); sw.setLayout(self.subject_row)
+        clay.addWidget(sw)
+
+        # 小组
+        clay.addWidget(self._section_label("小组"))
+        self.group_row = QHBoxLayout()
+        self.group_row.setSpacing(6)
+        self.group_row.setContentsMargins(0, 0, 0, 0)
+        grw = QWidget(); grw.setStyleSheet("background:transparent;"); grw.setLayout(self.group_row)
+        clay.addWidget(grw)
+
+        # 抽取设置
+        clay.addWidget(self._section_label("抽取设置"))
+        setrow = QHBoxLayout()
+        setrow.setContentsMargins(0, 0, 0, 0)
+        setrow.setSpacing(8)
+
+        set_lbl = QLabel("每次抽取人数")
+        set_lbl.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        set_lbl.setStyleSheet(f"color:{TEXT}; background:transparent;")
+        setrow.addWidget(set_lbl)
+        setrow.addStretch()
+
+        # 数字框
+        num_box = QFrame()
+        num_box.setFixedHeight(32)
+        num_box.setStyleSheet(f"""
+            QFrame {{
+                background:{CHIP_BG};
+                border:1px solid {CHIP_BORDER};
+                border-radius:8px;
+            }}
+        """)
+        nlay = QHBoxLayout(num_box)
+        nlay.setContentsMargins(4, 0, 4, 0)
+        nlay.setSpacing(2)
+
+        self.count_input = QLineEdit("1")
+        self.count_input.setFixedWidth(36)
+        self.count_input.setAlignment(Qt.AlignCenter)
+        self.count_input.setReadOnly(True)
+        self.count_input.setCursor(Qt.PointingHandCursor)
+        self.count_input.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        self.count_input.setStyleSheet(f"""
+            QLineEdit {{
+                background:transparent; color:{TEXT};
+                border:none;
+            }}
+        """)
+        self.count_input.mousePressEvent = self._on_count_click
+        nlay.addWidget(self.count_input)
+
+        arr_col = QVBoxLayout()
+        arr_col.setContentsMargins(0, 0, 0, 0)
+        arr_col.setSpacing(0)
+        up = QPushButton("▲")
+        up.setFixedSize(20, 15)
+        up.setCursor(Qt.PointingHandCursor)
+        up.setStyleSheet(f"""
+            QPushButton {{
+                background:transparent; color:{ACCENT};
+                border:none; font-size:6pt;
+            }}
+            QPushButton:hover {{ color:{ACCENT_LT}; }}
+        """)
+        up.clicked.connect(lambda: self._nudge(+1))
+        arr_col.addWidget(up)
+
+        down = QPushButton("▼")
+        down.setFixedSize(20, 15)
+        down.setCursor(Qt.PointingHandCursor)
+        down.setStyleSheet(f"""
+            QPushButton {{
+                background:transparent; color:{ACCENT};
+                border:none; font-size:6pt;
+            }}
+            QPushButton:hover {{ color:{ACCENT_LT}; }}
+        """)
+        down.clicked.connect(lambda: self._nudge(-1))
+        arr_col.addWidget(down)
+
+        nlay.addLayout(arr_col)
+        setrow.addWidget(num_box)
+        clay.addLayout(setrow)
+
+        # 候选人数
+        pool_box = QFrame()
+        pool_box.setFixedHeight(38)
+        pool_box.setStyleSheet(f"""
+            QFrame {{
+                background:{ACCENT};
+                border-radius:8px;
+            }}
+        """)
+        play = QHBoxLayout(pool_box)
+        play.setContentsMargins(14, 0, 14, 0)
+
+        pl = QLabel("当前候选")
+        pl.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        pl.setStyleSheet("color:#eaf1f6; background:transparent;")
+        play.addWidget(pl)
+        play.addStretch()
+
+        self.pool_count_label = QLabel("0 人")
+        self.pool_count_label.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
+        self.pool_count_label.setStyleSheet("color:#ffffff; background:transparent;")
+        play.addWidget(self.pool_count_label)
+        clay.addWidget(pool_box)
+
+        # 抽取按钮
+        self.draw_btn = QPushButton("开 始 抽 取")
+        self.draw_btn.setCursor(Qt.PointingHandCursor)
+        self.draw_btn.setFixedHeight(52)
+        self.draw_btn.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        self.draw_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{SMOKE};
+                color:#ffffff;
+                border:none; border-radius:12px;
+                letter-spacing:4px;
+            }}
+            QPushButton:hover {{ background:{SMOKE_HOVER}; }}
+        """)
+        self.draw_btn.clicked.connect(self.on_draw_click)
+        clay.addWidget(self.draw_btn)
+
+        # 底部：状态 + 设置
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(2, 0, 2, 0)
+        self.status_label = QLabel("")
+        self.status_label.setFont(QFont("Microsoft YaHei", 9))
+        self.status_label.setStyleSheet(f"color:{MUTED}; background:transparent;")
+        bottom.addWidget(self.status_label)
+        bottom.addStretch()
+
+        menu_btn = QPushButton("⚙ 设置")
+        menu_btn.setCursor(Qt.PointingHandCursor)
+        menu_btn.setStyleSheet(f"""
+            QPushButton {{
+                color:{MUTED}; background:transparent;
+                border:none; padding:4px 8px;
+                font-family:'Microsoft YaHei'; font-size:9pt;
+            }}
+            QPushButton:hover {{ color:{ACCENT}; }}
+        """)
+        menu_btn.clicked.connect(self.show_menu)
+        bottom.addWidget(menu_btn)
+        clay.addLayout(bottom)
+
+        main.addWidget(content, 1)
 
         self._refresh_filters()
         self._update_status()
-        if not self.students:
-            self.result_label.config(text="尚未导入花名册", fg="#c5d4e0")
 
-    # ============================================================
-    #  展开态
-    # ============================================================
-    def _build_expanded(self):
-        f = self.expanded_frame
-
-        # 标题栏
-        title = tk.Frame(f, bg=PANEL, height=36)
-        title.pack(fill='x')
-        title.pack_propagate(False)
-
-        tk.Label(title, text="课堂随机点名", bg=PANEL, fg=TEXT,
-                 font=('Microsoft YaHei', 10, 'bold')).pack(side='left', padx=12)
-
-        close_btn = tk.Label(title, text="✕", bg=PANEL, fg=MUTED,
-                              font=('Microsoft YaHei', 11), padx=10, cursor='hand2')
-        close_btn.pack(side='right')
-        close_btn.bind('<Button-1>', lambda e: self.root.destroy())
-        close_btn.bind('<Enter>', lambda e: close_btn.config(fg=DANGER))
-        close_btn.bind('<Leave>', lambda e: close_btn.config(fg=MUTED))
-
-        collapse_btn = tk.Label(title, text="◀ 收起", bg=PANEL, fg=MUTED,
-                                 font=('Microsoft YaHei', 9), padx=6, cursor='hand2')
-        collapse_btn.pack(side='right')
-        collapse_btn.bind('<Button-1>', lambda e: self.collapse())
-        collapse_btn.bind('<Enter>', lambda e: collapse_btn.config(fg=ACCENT))
-        collapse_btn.bind('<Leave>', lambda e: collapse_btn.config(fg=MUTED))
-
-        for w in (title,):
-            w.bind('<Button-1>', self._start_drag)
-            w.bind('<B1-Motion>', self._on_drag)
-
-        # 结果卡片
-        card = tk.Frame(f, bg=CARD, height=120)
-        card.pack(fill='x', padx=12, pady=(14, 10))
-        card.pack_propagate(False)
-        self.result_label = tk.Label(card, text="准备就绪", fg="#ffffff", bg=CARD,
-                                      font=('Microsoft YaHei', 22, 'bold'))
-        self.result_label.pack(expand=True, fill='both')
-
-        # 性别
-        tk.Label(f, text="性别", fg=ACCENT, bg=BG,
-                 font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', padx=16, pady=(0, 2))
-        self.gender_row = tk.Frame(f, bg=BG)
-        self.gender_row.pack(fill='x', padx=14, pady=(0, 8))
-
-        # 选科
-        tk.Label(f, text="选科", fg=ACCENT, bg=BG,
-                 font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', padx=16, pady=(0, 2))
-        self.subject_row = tk.Frame(f, bg=BG)
-        self.subject_row.pack(fill='x', padx=14, pady=(0, 8))
-
-        # 小组
-        tk.Label(f, text="小组", fg=ACCENT, bg=BG,
-                 font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', padx=16, pady=(0, 2))
-        self.group_row = tk.Frame(f, bg=BG)
-        self.group_row.pack(fill='x', padx=14, pady=(0, 10))
-
-        # 抽取设置
-        tk.Label(f, text="抽取设置", fg=ACCENT, bg=BG,
-                 font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', padx=16)
-
-        setrow = tk.Frame(f, bg=BG)
-        setrow.pack(fill='x', padx=14, pady=(4, 8))
-
-        tk.Label(setrow, text="每次抽取人数", fg=TEXT, bg=BG,
-                 font=('Microsoft YaHei', 10, 'bold')).pack(side='left')
-
-        num_wrap = tk.Frame(setrow, bg=CHIP_BG, highlightbackground=CHIP_BORDER,
-                             highlightthickness=1)
-        num_wrap.pack(side='right')
-
-        self.count_entry = tk.Entry(num_wrap, width=3, justify='center',
-                                     bg=CHIP_BG, fg=TEXT, relief='flat',
-                                     font=('Microsoft YaHei', 11, 'bold'),
-                                     insertbackground=TEXT)
-        self.count_entry.insert(0, '1')
-        self.count_entry.pack(side='left', padx=(8, 4), pady=4)
-        self.count_entry.bind('<Button-1>', self._open_numpad)
-
-        arrows = tk.Frame(num_wrap, bg=CHIP_BG)
-        arrows.pack(side='left')
-
-        up = tk.Label(arrows, text="▲", bg=CHIP_BG, fg=ACCENT,
-                       font=('Microsoft YaHei', 6), cursor='hand2', padx=3)
-        up.pack()
-        up.bind('<Button-1>', lambda e: self._nudge(+1))
-
-        down = tk.Label(arrows, text="▼", bg=CHIP_BG, fg=ACCENT,
-                         font=('Microsoft YaHei', 6), cursor='hand2', padx=3)
-        down.pack()
-        down.bind('<Button-1>', lambda e: self._nudge(-1))
-
-        # 候选人数
-        pool_row = tk.Frame(f, bg=ACCENT, height=38)
-        pool_row.pack(fill='x', padx=14, pady=(4, 0))
-        pool_row.pack_propagate(False)
-
-        tk.Label(pool_row, text="当前候选", fg="#eaf1f6", bg=ACCENT,
-                 font=('Microsoft YaHei', 10, 'bold')).pack(side='left', padx=12)
-        self.pool_count_label = tk.Label(pool_row, text="0 人", fg="#ffffff", bg=ACCENT,
-                                          font=('Microsoft YaHei', 12, 'bold'))
-        self.pool_count_label.pack(side='right', padx=12)
-
-        # 抽取按钮
-        self.draw_btn = tk.Button(f, text="开 始 抽 取", command=self.on_draw_click,
-                                   bg=SMOKE, fg="#ffffff",
-                                   activebackground=SMOKE_HOVER, activeforeground="#ffffff",
-                                   relief='flat', bd=0, cursor='hand2',
-                                   font=('Microsoft YaHei', 14, 'bold'))
-        self.draw_btn.pack(fill='x', padx=14, pady=(12, 0), ipady=14)
-
-        # 底部状态栏（★ 保证可见，不用圆角裁切了）
-        bottom = tk.Frame(f, bg=BG, height=32)
-        bottom.pack(fill='x', padx=16, pady=(8, 10))
-        bottom.pack_propagate(False)
-
-        self.status_label = tk.Label(bottom, text="", fg=MUTED, bg=BG,
-                                      font=('Microsoft YaHei', 9), anchor='w')
-        self.status_label.pack(side='left', fill='x', expand=True)
-
-        menu_btn = tk.Label(bottom, text="⚙ 设置", fg=MUTED, bg=BG,
-                             font=('Microsoft YaHei', 9), cursor='hand2')
-        menu_btn.pack(side='right')
-        menu_btn.bind('<Button-1>', self.show_menu)
-        menu_btn.bind('<Enter>', lambda e: menu_btn.config(fg=ACCENT))
-        menu_btn.bind('<Leave>', lambda e: menu_btn.config(fg=MUTED))
-
-    def _build_collapsed(self):
-        f = self.collapsed_frame
-        f.configure(bg=ACCENT_LT)
-        self.arrow_label = tk.Label(f, text="◀", bg=ACCENT_LT, fg="#ffffff",
-                                     font=('Microsoft YaHei', 18, 'bold'), cursor='hand2')
-        self.arrow_label.pack(expand=True, fill='both')
-        for w in (f, self.arrow_label):
-            w.bind('<Enter>', self._schedule_expand)
-            w.bind('<Leave>', self._cancel_schedule)
-            w.bind('<Button-1>', lambda e: self.expand())
-
-    def _start_drag(self, e):
-        self._drag_x = e.x_root - self.root.winfo_x()
-        self._drag_y = e.y_root - self.root.winfo_y()
-
-    def _on_drag(self, e):
-        if self.collapsed: return
-        x = e.x_root - self._drag_x
-        y = e.y_root - self._drag_y
-        x = max(0, min(x, self.sw - self.EXP_W))
-        y = max(0, min(y, self.sh - self.EXP_H))
-        self.root.geometry(f"+{x}+{y}")
-
-    def collapse(self):
-        if self.collapsed: return
-        self.collapsed = True
-        self.saved_pos = (self.root.winfo_x(), self.root.winfo_y())
-        x = self.root.winfo_x()
-        if x + self.EXP_W // 2 > self.sw // 2:
-            new_x = self.sw - self.COL_W; arrow = "◀"
-        else:
-            new_x = 0; arrow = "▶"
-        y = max(50, min(self.root.winfo_y(), self.sh - self.COL_H - 50))
-        self.expanded_frame.pack_forget()
-        self.collapsed_frame.pack(fill='both', expand=True)
-        self.arrow_label.config(text=arrow)
-        self.root.geometry(f"{self.COL_W}x{self.COL_H}+{new_x}+{y}")
-        self.root.attributes('-alpha', 0.55)
-        self._cancel_schedule()
-
-    def expand(self):
-        self._cancel_schedule()
-        if not self.collapsed: return
-        self.collapsed = False
-        if self.saved_pos:
-            x, y = self.saved_pos
-        else:
-            x = self.sw - self.EXP_W - 40; y = 80
-        x = max(0, min(x, self.sw - self.EXP_W))
-        y = max(0, min(y, self.sh - self.EXP_H))
-        self.collapsed_frame.pack_forget()
-        self.expanded_frame.pack(fill='both', expand=True)
-        self.root.geometry(f"{self.EXP_W}x{self.EXP_H}+{x}+{y}")
-        self.root.attributes('-alpha', 1.0)
-
-    def _schedule_expand(self, e=None):
-        self._cancel_schedule()
-        self._expand_job = self.root.after(350, self.expand)
-
-    def _cancel_schedule(self, e=None):
-        if self._expand_job:
-            try: self.root.after_cancel(self._expand_job)
-            except Exception: pass
-            self._expand_job = None
-
-    def _clear_frame(self, frame):
-        for w in frame.winfo_children(): w.destroy()
-
-    def _make_chip(self, parent, text, on, command):
-        lbl = tk.Label(parent, text=text, cursor='hand2',
-                       font=('Microsoft YaHei', 9, 'bold'),
-                       bg=(CHIP_ON_BG if on else CHIP_BG),
-                       fg=(CHIP_ON_FG if on else CHIP_TEXT),
-                       padx=10, pady=3)
-        lbl.pack(side='left', padx=(0, 5), pady=2)
-        lbl.bind('<Button-1>', lambda e: command())
+    def _section_label(self, text):
+        lbl = QLabel(text)
+        lbl.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
+        lbl.setStyleSheet(f"color:{ACCENT}; background:transparent;")
         return lbl
 
+    # ---------------- 筛选 ----------------
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _make_chip(self, text, on, command):
+        btn = QPushButton(text)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFixedHeight(28)
+        if on:
+            style = f"""
+                QPushButton {{
+                    background:{CHIP_ON_BG}; color:{CHIP_ON_FG};
+                    border:none; border-radius:14px;
+                    padding:0 14px;
+                    font-family:'Microsoft YaHei'; font-size:9pt; font-weight:bold;
+                }}
+                QPushButton:hover {{ background:{ACCENT_LT}; }}
+            """
+        else:
+            style = f"""
+                QPushButton {{
+                    background:{CHIP_BG}; color:{CHIP_TEXT};
+                    border:1px solid {CHIP_BORDER}; border-radius:14px;
+                    padding:0 14px;
+                    font-family:'Microsoft YaHei'; font-size:9pt; font-weight:bold;
+                }}
+                QPushButton:hover {{ background:#b0c4d4; }}
+            """
+        btn.setStyleSheet(style)
+        btn.clicked.connect(command)
+        return btn
+
     def _refresh_filters(self):
-        self._clear_frame(self.gender_row)
+        # 性别
+        self._clear_layout(self.gender_row)
         opts = [('all', '全部')]
         genders = {s.get('gender', '') for s in self.students} - {''}
         if '男' in genders: opts.append(('男', '男生'))
@@ -415,14 +666,16 @@ class App:
             def cmd(v=v):
                 self.filters['gender'] = v
                 self._refresh_filters(); self._update_status()
-            self._make_chip(self.gender_row, label, on, cmd)
+            self.gender_row.addWidget(self._make_chip(label, on, cmd))
+        self.gender_row.addStretch()
 
-        self._clear_frame(self.subject_row)
-        seen = []; s_set = set()
+        # 选科
+        self._clear_layout(self.subject_row)
+        seen, sset = [], set()
         for s in self.students:
             c = s.get('combo', '')
-            if c and c not in s_set:
-                s_set.add(c); seen.append(c)
+            if c and c not in sset:
+                sset.add(c); seen.append(c)
         if seen:
             for c in seen:
                 on = c in self.filters['subjects']
@@ -430,12 +683,15 @@ class App:
                     if c in self.filters['subjects']: self.filters['subjects'].discard(c)
                     else: self.filters['subjects'].add(c)
                     self._refresh_filters(); self._update_status()
-                self._make_chip(self.subject_row, c, on, cmd)
+                self.subject_row.addWidget(self._make_chip(c, on, cmd))
         else:
-            tk.Label(self.subject_row, text="（无选科信息）", fg=MUTED, bg=BG,
-                     font=('Microsoft YaHei', 9)).pack(side='left')
+            lbl = QLabel("（无选科信息）")
+            lbl.setStyleSheet(f"color:{MUTED}; background:transparent;")
+            self.subject_row.addWidget(lbl)
+        self.subject_row.addStretch()
 
-        self._clear_frame(self.group_row)
+        # 小组
+        self._clear_layout(self.group_row)
         groups = sorted({s['group'] for s in self.students if s.get('group')},
                         key=lambda x: (float(x) if x.replace('.', '', 1).isdigit() else 999, x))
         if groups:
@@ -445,10 +701,12 @@ class App:
                     if g in self.filters['groups']: self.filters['groups'].discard(g)
                     else: self.filters['groups'].add(g)
                     self._refresh_filters(); self._update_status()
-                self._make_chip(self.group_row, g, on, cmd)
+                self.group_row.addWidget(self._make_chip(g, on, cmd))
         else:
-            tk.Label(self.group_row, text="（无小组信息）", fg=MUTED, bg=BG,
-                     font=('Microsoft YaHei', 9)).pack(side='left')
+            lbl = QLabel("（无小组信息）")
+            lbl.setStyleSheet(f"color:{MUTED}; background:transparent;")
+            self.group_row.addWidget(lbl)
+        self.group_row.addStretch()
 
     def _get_pool(self):
         f = self.filters
@@ -462,9 +720,10 @@ class App:
 
     def _update_status(self):
         pool = self._get_pool()
-        self.pool_count_label.config(text=f"{len(pool)} 人")
-        self.status_label.config(text=f"花名册 {len(self.students)} 人")
+        self.pool_count_label.setText(f"{len(pool)} 人")
+        self.status_label.setText(f"花名册 {len(self.students)} 人")
 
+    # ---------------- 数字框 ----------------
     def _nudge(self, delta):
         try: v = int(self.pad_buffer)
         except Exception: v = 1
@@ -473,82 +732,70 @@ class App:
         self._render_pad()
 
     def _render_pad(self):
-        self.count_entry.delete(0, 'end')
-        self.count_entry.insert(0, self.pad_buffer)
+        self.count_input.setText(self.pad_buffer)
         try:
             v = int(self.pad_buffer)
             self.count = max(1, min(60, v))
         except Exception:
             self.count = 1
 
-    def _open_numpad(self, event=None):
+    def _on_count_click(self, e):
         if self.drawing:
-            messagebox.showinfo("提示", "抽奖中不能改人数"); return
-        self.pad_buffer = self.count_entry.get() or '1'
-        self._show_numpad_window()
+            QMessageBox.information(self, "提示", "抽奖中不能改人数")
+            return
+        self.pad_buffer = self.count_input.text() or '1'
 
-    def _show_numpad_window(self):
-        if self._numpad_win is not None:
-            try: self._numpad_win.destroy()
-            except Exception: pass
-        win = tk.Toplevel(self.root)
-        self._numpad_win = win
-        win.overrideredirect(True)
-        win.attributes('-topmost', True)
-        win.configure(bg=ACCENT)
-        x = self.root.winfo_x() + self.EXP_W - 200
-        y = self.root.winfo_y() + 280
-        if x < 10: x = 10
-        if x + 180 > self.sw: x = self.sw - 190
-        if y + 260 > self.sh: y = self.sh - 270
-        win.geometry(f"180x260+{x}+{y}")
-        grid = tk.Frame(win, bg=ACCENT)
-        grid.pack(expand=True, fill='both', padx=6, pady=6)
-        def press(k):
-            if k == 'ok':
-                self._render_pad(); win.destroy(); self._numpad_win = None; return
-            if k == 'del': self.pad_buffer = self.pad_buffer[:-1]
-            elif k == 'clr': self.pad_buffer = ''
-            else:
-                if self.pad_buffer == '0': self.pad_buffer = ''
-                if len(self.pad_buffer) < 2: self.pad_buffer += k
-            self.count_entry.delete(0, 'end')
-            self.count_entry.insert(0, self.pad_buffer)
-            try:
-                v = int(self.pad_buffer)
-                self.count = max(1, min(60, v))
-            except Exception:
-                self.count = 1
-        keys = [['1','2','3'],['4','5','6'],['7','8','9'],['del','0','clr']]
-        for row in keys:
-            r = tk.Frame(grid, bg=ACCENT); r.pack(fill='x', pady=2)
-            for k in row:
-                txt = '←' if k=='del' else ('C' if k=='clr' else k)
-                lbl = tk.Label(r, text=txt, bg=CARD, fg="#ffffff",
-                               font=('Microsoft YaHei', 13, 'bold'),
-                               width=4, height=2, cursor='hand2')
-                lbl.pack(side='left', padx=2)
-                lbl.bind('<Button-1>', lambda e, k=k: press(k))
-        ok = tk.Label(grid, text="确定", bg=ACCENT_LT, fg="#ffffff",
-                      font=('Microsoft YaHei', 12, 'bold'), height=2, cursor='hand2')
-        ok.pack(fill='x', pady=(4, 0))
-        ok.bind('<Button-1>', lambda e: press('ok'))
+        self._numpad = NumPad(self._on_numpad_press, self)
+        pos = self.mapToGlobal(self.count_input.pos())
+        self._numpad.move(pos.x() - 130, pos.y() + 40)
+        self._numpad.show()
 
+    def _on_numpad_press(self, k):
+        if k == 'OK':
+            self._render_pad()
+        elif k == 'DEL':
+            self.pad_buffer = self.pad_buffer[:-1]
+            self.count_input.setText(self.pad_buffer)
+        elif k == 'CLR':
+            self.pad_buffer = ''
+            self.count_input.setText('')
+        else:
+            if self.pad_buffer == '0': self.pad_buffer = ''
+            if len(self.pad_buffer) < 2:
+                self.pad_buffer += k
+            self.count_input.setText(self.pad_buffer)
+        try:
+            v = int(self.pad_buffer)
+            self.count = max(1, min(60, v))
+        except Exception:
+            self.count = 1
+
+    # ---------------- 抽取 ----------------
     def on_draw_click(self):
         if self.drawing: self._stop_rolling()
         else: self._start_rolling()
 
     def _start_rolling(self):
         if not self.students:
-            messagebox.showinfo("提示", "请先从「⚙ 设置」中导入花名册"); return
+            QMessageBox.information(self, "提示", "请先从「⚙ 设置」中导入花名册")
+            return
         self._roll_pool = self._get_pool()
         self._pending_pool = [s for s in self._roll_pool if not is_blocked(s)]
         if not self._roll_pool:
-            messagebox.showinfo("提示", "当前筛选条件下没有学生"); return
+            QMessageBox.information(self, "提示", "当前筛选条件下没有学生"); return
         if not self._pending_pool:
-            messagebox.showinfo("提示", "当前筛选条件下没有可抽取的学生"); return
+            QMessageBox.information(self, "提示", "当前筛选条件下没有可抽取的学生"); return
         self.drawing = True
-        self.draw_btn.config(text="停 止 抽 取", bg=DANGER, activebackground="#b91c1c")
+        self.draw_btn.setText("停 止 抽 取")
+        self.draw_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{DANGER};
+                color:#ffffff;
+                border:none; border-radius:12px;
+                letter-spacing:4px;
+            }}
+            QPushButton:hover {{ background:#a82020; }}
+        """)
         self._tick()
 
     def _fmt_names(self, picks):
@@ -563,64 +810,75 @@ class App:
         n = min(self.count, len(self._roll_pool))
         picks = random.sample(self._roll_pool, n)
         text, fs = self._fmt_names(picks)
-        self.result_label.config(text=text, fg="#ffffff",
-                                  font=('Microsoft YaHei', fs, 'bold'))
-        self._roll_timer = self.root.after(70, self._tick)
+        self.result_label.setText(text)
+        self.result_label.setFont(QFont("Microsoft YaHei", fs, QFont.Bold))
+        self._roll_timer = QTimer.singleShot(70, self._tick)
 
     def _stop_rolling(self):
         self.drawing = False
-        if self._roll_timer:
-            try: self.root.after_cancel(self._roll_timer)
-            except Exception: pass
-            self._roll_timer = None
-        self.draw_btn.config(text="开 始 抽 取", bg=SMOKE, activebackground=SMOKE_HOVER)
+        self.draw_btn.setText("开 始 抽 取")
+        self.draw_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{SMOKE};
+                color:#ffffff;
+                border:none; border-radius:12px;
+                letter-spacing:4px;
+            }}
+            QPushButton:hover {{ background:{SMOKE_HOVER}; }}
+        """)
         n = max(1, min(self.count, len(self._pending_pool)))
         picks = random.sample(self._pending_pool, n)
         text, fs = self._fmt_names(picks)
-        self.result_label.config(text=text, fg="#ffffff",
-                                  font=('Microsoft YaHei', fs, 'bold'))
+        self.result_label.setText(text)
+        self.result_label.setFont(QFont("Microsoft YaHei", fs, QFont.Bold))
 
-    def show_menu(self, event=None):
-        menu = tk.Menu(self.root, tearoff=0, bg=PANEL, fg=TEXT,
-                       activebackground=ACCENT, activeforeground="#ffffff",
-                       font=('Microsoft YaHei', 10))
-        menu.add_command(label="📥  导入花名册 (.xlsx / .csv)", command=self.import_roster)
-        menu.add_command(label="🗑  清空花名册", command=self.clear_roster)
-        menu.add_separator()
-        cm = tk.Menu(menu, tearoff=0, bg=PANEL, fg=TEXT,
-                     activebackground=ACCENT, activeforeground="#ffffff",
-                     font=('Microsoft YaHei', 10))
-        for n in [1, 2, 3, 4, 5]:
-            cm.add_command(label=f"每次抽 {n} 人", command=lambda n=n: self.set_count(n))
-        menu.add_cascade(label=f"🎯  每次抽取人数（当前 {self.count}）", menu=cm)
-        menu.add_separator()
-        if sys.platform == 'win32' and get_exe_path():
-            enabled = is_autostart_enabled()
-            menu.add_command(
-                label=("✅  开机自启（已开启）" if enabled else "☐  开机自启"),
-                command=lambda: self.toggle_autostart(not enabled))
-        else:
-            menu.add_command(label="（打包成 exe 后支持开机自启）", state='disabled')
-        menu.add_separator()
-        menu.add_command(label="ℹ  使用说明", command=self.show_help)
-        menu.add_command(label="✕  退出程序", command=self.root.destroy)
-        try: menu.tk_popup(event.x_root, event.y_root)
-        finally: menu.grab_release()
+    # ---------------- 菜单 ----------------
+    def show_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background:{PANEL};
+                color:{TEXT};
+                border:1px solid {CHIP_BORDER};
+                border-radius:8px;
+                padding:6px;
+                font-family:'Microsoft YaHei'; font-size:10pt;
+            }}
+            QMenu::item {{
+                padding:8px 24px 8px 12px;
+                border-radius:6px;
+            }}
+            QMenu::item:selected {{
+                background:{ACCENT}; color:#ffffff;
+            }}
+            QMenu::separator {{
+                height:1px; background:{CHIP_BORDER}; margin:4px 8px;
+            }}
+        """)
+
+        menu.addAction("📥  导入花名册 (.xlsx / .csv)", self.import_roster)
+        menu.addAction("🗑  清空花名册（需密码）", self.clear_roster)
+        menu.addSeparator()
+
+        sub = menu.addMenu(f"🎯  每次抽取人数（当前 {self.count}）")
+        for n in range(1, 6):
+            a = sub.addAction(f"每次抽 {n} 人")
+            a.triggered.connect(lambda _, nn=n: self.set_count(nn))
+
+        menu.addSeparator()
+        menu.addAction("ℹ  使用说明", self.show_help)
+        menu.addAction("✕  退出程序", self.close)
+
+        menu.exec(self.mapToGlobal(self.bg.pos() + QPoint(self.EXP_W - 60, self.EXP_H - 30)))
 
     def set_count(self, n):
         self.count = n; self.pad_buffer = str(n); self._render_pad()
 
-    def toggle_autostart(self, enabled):
-        if set_autostart(enabled):
-            messagebox.showinfo("提示", "已开启开机自启" if enabled else "已关闭开机自启")
-        else:
-            messagebox.showwarning("提示", "操作失败")
-
+    # ---------------- 导入 / 清空 ----------------
     def import_roster(self):
-        path = filedialog.askopenfilename(
-            title="选择花名册文件",
-            filetypes=[("Excel 文件", "*.xlsx *.xls"), ("CSV 文件", "*.csv"),
-                       ("文本文件", "*.txt *.tsv"), ("所有文件", "*.*")])
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择花名册文件", "",
+            "表格文件 (*.xlsx *.xls *.csv *.txt *.tsv);;所有文件 (*.*)")
         if not path: return
         try:
             p = Path(path)
@@ -635,26 +893,34 @@ class App:
                 rows = parse_csv_text(text)
             students = rows_to_students(rows)
             if not students:
-                messagebox.showwarning("提示", "未解析到有效的学生数据"); return
+                QMessageBox.warning(self, "提示", "未解析到有效的学生数据"); return
             self.students = students
             save_json(ROSTER_FILE, students)
             self.filters = {'gender': 'all', 'subjects': set(), 'groups': set()}
             self._refresh_filters(); self._update_status()
-            self.result_label.config(text=f"已导入 {len(students)} 人", fg="#ffffff")
+            self.result_label.setText(f"已导入 {len(students)} 人")
         except Exception as e:
-            messagebox.showerror("导入失败", str(e))
+            QMessageBox.critical(self, "导入失败", str(e))
 
     def clear_roster(self):
-        if not self.students: return
-        if not messagebox.askyesno("确认", "确定要清空花名册吗？"): return
+        if not self.students:
+            QMessageBox.information(self, "提示", "当前没有花名册"); return
+
+        # ★ 弹密码框
+        dlg = PasswordDialog(self)
+        dlg.move(self.geometry().center() - QPoint(150, 90))
+        if not dlg.exec() or not dlg.result_ok:
+            return
+
         self.students = []
         save_json(ROSTER_FILE, [])
         self.filters = {'gender': 'all', 'subjects': set(), 'groups': set()}
         self._refresh_filters(); self._update_status()
-        self.result_label.config(text="花名册已清空", fg="#c5d4e0")
+        self.result_label.setText("花名册已清空")
+        QMessageBox.information(self, "已清空", "花名册已清空。")
 
     def show_help(self):
-        messagebox.showinfo("使用说明",
+        QMessageBox.information(self, "使用说明",
             "【课堂随机点名 · 悬浮窗版】\n\n"
             "· 点右上「◀ 收起」→ 变成屏幕边缘的小箭头\n"
             "· 鼠标移到箭头上 → 自动展开\n"
@@ -662,11 +928,109 @@ class App:
             "【导入花名册】\n"
             "点「⚙ 设置 → 导入花名册」\n"
             "表头四列：姓名 | 性别 | 选科 | 小组\n\n"
+            "【清空花名册】\n"
+            f"需要输入管理密码（默认 {CLEAR_PASSWORD}）\n\n"
             "花名册保存在：\n" + str(ROSTER_FILE))
 
-    def run(self):
-        self.root.mainloop()
+    # ---------------- 拖动 / 收起 ----------------
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and e.position().y() < 40:
+            self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            e.accept()
+
+    def mouseMoveEvent(self, e):
+        if self._drag_pos and e.buttons() & Qt.LeftButton:
+            self.move(e.globalPosition().toPoint() - self._drag_pos)
+            e.accept()
+
+    def mouseReleaseEvent(self, e):
+        self._drag_pos = None
+
+    def collapse(self):
+        if self.collapsed: return
+        self.collapsed = True
+        self.saved_pos = self.pos()
+        x = self.x()
+        if x + self.EXP_W // 2 > self.sw // 2:
+            new_x = self.sw - self.COL_W
+        else:
+            new_x = 0
+        y = max(50, min(self.y(), self.sh - self.COL_H - 50))
+        self.setFixedSize(self.COL_W, self.COL_H)
+        self.setWindowOpacity(0.55)
+        self.move(new_x, y)
+
+        # 把主布局隐藏，显示箭头
+        self._show_arrow(True)
+
+    def _show_arrow(self, show):
+        # 简化处理：收起时把内容换成箭头
+        if show:
+            # 清空当前 bg 里的布局
+            old = self.bg.layout()
+            if old:
+                while old.count():
+                    it = old.takeAt(0)
+                    w = it.widget()
+                    if w: w.deleteLater()
+            lay = QVBoxLayout(self.bg)
+            lay.setContentsMargins(0, 0, 0, 0)
+            arrow = QLabel("◀" if self.x() > self.sw // 2 else "▶")
+            arrow.setAlignment(Qt.AlignCenter)
+            arrow.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
+            arrow.setStyleSheet("color:#ffffff; background:transparent;")
+            lay.addWidget(arrow)
+            self.bg.setStyleSheet(f"background:{ACCENT_LT}; border-radius:6px;")
+            self.bg.installEventFilter(self)
+            arrow.installEventFilter(self)
+        else:
+            # 展开：重建 UI
+            self.bg.setStyleSheet("")
+            old = self.bg.layout()
+            if old:
+                while old.count():
+                    it = old.takeAt(0)
+                    w = it.widget()
+                    if w: w.deleteLater()
+            self._build_ui()
+
+    def eventFilter(self, obj, e):
+        from PySide6.QtCore import QEvent
+        if self.collapsed:
+            if e.type() == QEvent.Enter:
+                QTimer.singleShot(350, self.expand)
+            elif e.type() == QEvent.MouseButtonPress:
+                self.expand()
+                return True
+        return super().eventFilter(obj, e)
+
+    def expand(self):
+        if not self.collapsed: return
+        self.collapsed = False
+        self.setWindowOpacity(1.0)
+        self.setFixedSize(self.EXP_W, self.EXP_H)
+        if self.saved_pos:
+            x, y = self.saved_pos.x(), self.saved_pos.y()
+        else:
+            x = self.sw - self.EXP_W - 40; y = 80
+        x = max(0, min(x, self.sw - self.EXP_W))
+        y = max(0, min(y, self.sh - self.EXP_H))
+        self.move(x, y)
+        self._show_arrow(False)
+
+
+# ============================================================
+#  入口
+# ============================================================
+def main():
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    app = QApplication(sys.argv)
+    app.setFont(QFont("Microsoft YaHei", 10))
+    win = RollCallApp()
+    win.show()
+    sys.exit(app.exec())
 
 
 if __name__ == '__main__':
-    App().run()
+    main()
