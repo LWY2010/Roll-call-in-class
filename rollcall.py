@@ -1,26 +1,21 @@
 """
 课堂随机点名 · 悬浮窗版（PySide6 圆角真无边框）
 ================================================
-· 真圆角 + 真透明，不再有裁剪问题
+· 真圆角 + 真透明
 · 悬浮在 PPT 上也能用
 · 收起后贴在屏幕边缘成半透明小箭头
-· 清空花名册需要输入密码（默认 888888）
-· 花名册保存在用户目录
-
-依赖：
-    pip install PySide6 openpyxl
-打包：
-    pyinstaller -F -w -n "课堂点名" rollcall.py
+· 清空花名册需要输入密码
+· 支持开机自动启动
+· 密码支持外部重置（配合 reset_password.py）
 """
 import json, os, random, re, sys, csv, io
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QPoint, QRectF, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QFont, QColor, QPainter, QPainterPath, QBrush, QPen, QIcon
+from PySide6.QtCore import Qt, QTimer, QPoint, QRectF, QEvent
+from PySide6.QtGui import QFont, QColor, QPainter, QPainterPath, QBrush, QAction
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFrame, QHBoxLayout, QVBoxLayout,
-    QGridLayout, QLineEdit, QDialog, QMenu, QFileDialog, QMessageBox,
-    QGraphicsDropShadowEffect, QSizePolicy, QSpacerItem
+    QGridLayout, QLineEdit, QDialog, QMenu, QFileDialog, QMessageBox
 )
 
 try:
@@ -34,9 +29,10 @@ APP_NAME = "ClassRollCall"
 DATA_DIR = Path(os.environ.get('APPDATA', Path.home())) / APP_NAME
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ROSTER_FILE = DATA_DIR / "roster.json"
+CONFIG_FILE = DATA_DIR / "config.json"
 
-# ============ 密码 ============
-CLEAR_PASSWORD = "0204"      # ★ 清空密码，改这里
+# ============ 默认密码 ============
+DEFAULT_PASSWORD = "01180204"
 
 # ============ 配色 ============
 BG          = "#c5d4e0"
@@ -81,6 +77,53 @@ def save_json(path, data):
     except Exception: pass
 
 
+def get_current_password():
+    """优先读外部配置，没有就用默认密码"""
+    cfg = load_json(CONFIG_FILE, {})
+    pwd = cfg.get('password', '')
+    if isinstance(pwd, str) and pwd:
+        return pwd
+    return DEFAULT_PASSWORD
+
+
+# ============================================================
+#  开机自启
+# ============================================================
+def get_exe_path():
+    return sys.executable if getattr(sys, 'frozen', False) else None
+
+def is_autostart_enabled():
+    if sys.platform != 'win32': return False
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
+        try:
+            winreg.QueryValueEx(k, APP_NAME); return True
+        except FileNotFoundError: return False
+        finally: winreg.CloseKey(k)
+    except Exception: return False
+
+def set_autostart(enabled):
+    if sys.platform != 'win32': return False
+    exe = get_exe_path()
+    if not exe: return False
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+        if enabled:
+            winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ, f'"{exe}"')
+        else:
+            try: winreg.DeleteValue(k, APP_NAME)
+            except FileNotFoundError: pass
+        winreg.CloseKey(k); return True
+    except Exception: return False
+
+
+# ============================================================
+#  表格解析
+# ============================================================
 FIELD_ALIASES = {
     'name':    ['姓名', '名字', '学生姓名', '学生', 'name'],
     'gender':  ['性别', 'sex', 'gender'],
@@ -149,7 +192,6 @@ def parse_xlsx(path):
 #  圆角容器
 # ============================================================
 class RoundedWidget(QWidget):
-    """一个带圆角和阴影的容器"""
     def __init__(self, radius=18, bg=BG, parent=None):
         super().__init__(parent)
         self.radius = radius
@@ -167,7 +209,7 @@ class RoundedWidget(QWidget):
 
 
 # ============================================================
-#  密码对话框
+#  密码对话框（★ 加了"忘记密码"提示）
 # ============================================================
 class PasswordDialog(QDialog):
     def __init__(self, parent=None):
@@ -175,7 +217,7 @@ class PasswordDialog(QDialog):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.setFixedSize(300, 180)
+        self.setFixedSize(300, 200)      # ★ 高度从 180 加到 200，容纳提示
         self.result_ok = False
 
         outer = QVBoxLayout(self)
@@ -186,13 +228,20 @@ class PasswordDialog(QDialog):
 
         lay = QVBoxLayout(self.bg)
         lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(12)
+        lay.setSpacing(10)
 
         title = QLabel("请输入管理密码")
         title.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
         title.setStyleSheet(f"color:{TEXT}; background:transparent;")
         title.setAlignment(Qt.AlignCenter)
         lay.addWidget(title)
+
+        # ★ 密码提示
+        hint = QLabel("忘记密码请联系程序设计者")
+        hint.setFont(QFont("Microsoft YaHei", 8))
+        hint.setStyleSheet(f"color:{MUTED}; background:transparent;")
+        hint.setAlignment(Qt.AlignCenter)
+        lay.addWidget(hint)
 
         self.edit = QLineEdit()
         self.edit.setEchoMode(QLineEdit.Password)
@@ -249,7 +298,8 @@ class PasswordDialog(QDialog):
         self.edit.setFocus()
 
     def try_ok(self):
-        if self.edit.text() == CLEAR_PASSWORD:
+        # ★ 用 get_current_password() 而不是常量
+        if self.edit.text() == get_current_password():
             self.result_ok = True
             self.accept()
         else:
@@ -359,12 +409,10 @@ class RollCallApp(QWidget):
         self.saved_pos = None
         self._drag_pos = None
 
-        # 屏幕位置
         screen = QApplication.primaryScreen().availableGeometry()
         self.sw, self.sh = screen.width(), screen.height()
         self.move(self.sw - self.EXP_W - 40, 80)
 
-        # 主容器（圆角）
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.bg = RoundedWidget(radius=18, bg=BG, parent=self)
@@ -372,13 +420,11 @@ class RollCallApp(QWidget):
 
         self._build_ui()
 
-    # ---------------- UI ----------------
     def _build_ui(self):
         main = QVBoxLayout(self.bg)
         main.setContentsMargins(0, 0, 0, 0)
         main.setSpacing(0)
 
-        # ============ 标题栏 ============
         title = QFrame()
         title.setFixedHeight(40)
         title.setStyleSheet(f"background:{PANEL}; border-top-left-radius:18px; border-top-right-radius:18px;")
@@ -420,14 +466,12 @@ class RollCallApp(QWidget):
 
         main.addWidget(title)
 
-        # ============ 内容区 ============
         content = QWidget()
         content.setStyleSheet("background:transparent;")
         clay = QVBoxLayout(content)
         clay.setContentsMargins(14, 14, 14, 14)
         clay.setSpacing(10)
 
-        # 结果卡片
         self.result_card = QFrame()
         self.result_card.setFixedHeight(120)
         self.result_card.setStyleSheet(f"""
@@ -445,7 +489,6 @@ class RollCallApp(QWidget):
         rlay.addWidget(self.result_label)
         clay.addWidget(self.result_card)
 
-        # 性别
         clay.addWidget(self._section_label("性别"))
         self.gender_row = QHBoxLayout()
         self.gender_row.setSpacing(6)
@@ -453,7 +496,6 @@ class RollCallApp(QWidget):
         gw = QWidget(); gw.setStyleSheet("background:transparent;"); gw.setLayout(self.gender_row)
         clay.addWidget(gw)
 
-        # 选科
         clay.addWidget(self._section_label("选科"))
         self.subject_row = QHBoxLayout()
         self.subject_row.setSpacing(6)
@@ -461,7 +503,6 @@ class RollCallApp(QWidget):
         sw = QWidget(); sw.setStyleSheet("background:transparent;"); sw.setLayout(self.subject_row)
         clay.addWidget(sw)
 
-        # 小组
         clay.addWidget(self._section_label("小组"))
         self.group_row = QHBoxLayout()
         self.group_row.setSpacing(6)
@@ -469,7 +510,6 @@ class RollCallApp(QWidget):
         grw = QWidget(); grw.setStyleSheet("background:transparent;"); grw.setLayout(self.group_row)
         clay.addWidget(grw)
 
-        # 抽取设置
         clay.addWidget(self._section_label("抽取设置"))
         setrow = QHBoxLayout()
         setrow.setContentsMargins(0, 0, 0, 0)
@@ -481,7 +521,6 @@ class RollCallApp(QWidget):
         setrow.addWidget(set_lbl)
         setrow.addStretch()
 
-        # 数字框
         num_box = QFrame()
         num_box.setFixedHeight(32)
         num_box.setStyleSheet(f"""
@@ -543,7 +582,6 @@ class RollCallApp(QWidget):
         setrow.addWidget(num_box)
         clay.addLayout(setrow)
 
-        # 候选人数
         pool_box = QFrame()
         pool_box.setFixedHeight(38)
         pool_box.setStyleSheet(f"""
@@ -567,7 +605,6 @@ class RollCallApp(QWidget):
         play.addWidget(self.pool_count_label)
         clay.addWidget(pool_box)
 
-        # 抽取按钮
         self.draw_btn = QPushButton("开 始 抽 取")
         self.draw_btn.setCursor(Qt.PointingHandCursor)
         self.draw_btn.setFixedHeight(52)
@@ -584,7 +621,6 @@ class RollCallApp(QWidget):
         self.draw_btn.clicked.connect(self.on_draw_click)
         clay.addWidget(self.draw_btn)
 
-        # 底部：状态 + 设置
         bottom = QHBoxLayout()
         bottom.setContentsMargins(2, 0, 2, 0)
         self.status_label = QLabel("")
@@ -618,7 +654,6 @@ class RollCallApp(QWidget):
         lbl.setStyleSheet(f"color:{ACCENT}; background:transparent;")
         return lbl
 
-    # ---------------- 筛选 ----------------
     def _clear_layout(self, layout):
         while layout.count():
             item = layout.takeAt(0)
@@ -655,7 +690,6 @@ class RollCallApp(QWidget):
         return btn
 
     def _refresh_filters(self):
-        # 性别
         self._clear_layout(self.gender_row)
         opts = [('all', '全部')]
         genders = {s.get('gender', '') for s in self.students} - {''}
@@ -669,7 +703,6 @@ class RollCallApp(QWidget):
             self.gender_row.addWidget(self._make_chip(label, on, cmd))
         self.gender_row.addStretch()
 
-        # 选科
         self._clear_layout(self.subject_row)
         seen, sset = [], set()
         for s in self.students:
@@ -690,7 +723,6 @@ class RollCallApp(QWidget):
             self.subject_row.addWidget(lbl)
         self.subject_row.addStretch()
 
-        # 小组
         self._clear_layout(self.group_row)
         groups = sorted({s['group'] for s in self.students if s.get('group')},
                         key=lambda x: (float(x) if x.replace('.', '', 1).isdigit() else 999, x))
@@ -723,7 +755,6 @@ class RollCallApp(QWidget):
         self.pool_count_label.setText(f"{len(pool)} 人")
         self.status_label.setText(f"花名册 {len(self.students)} 人")
 
-    # ---------------- 数字框 ----------------
     def _nudge(self, delta):
         try: v = int(self.pad_buffer)
         except Exception: v = 1
@@ -744,7 +775,6 @@ class RollCallApp(QWidget):
             QMessageBox.information(self, "提示", "抽奖中不能改人数")
             return
         self.pad_buffer = self.count_input.text() or '1'
-
         self._numpad = NumPad(self._on_numpad_press, self)
         pos = self.mapToGlobal(self.count_input.pos())
         self._numpad.move(pos.x() - 130, pos.y() + 40)
@@ -770,7 +800,6 @@ class RollCallApp(QWidget):
         except Exception:
             self.count = 1
 
-    # ---------------- 抽取 ----------------
     def on_draw_click(self):
         if self.drawing: self._stop_rolling()
         else: self._start_rolling()
@@ -832,7 +861,6 @@ class RollCallApp(QWidget):
         self.result_label.setText(text)
         self.result_label.setFont(QFont("Microsoft YaHei", fs, QFont.Bold))
 
-    # ---------------- 菜单 ----------------
     def show_menu(self):
         menu = QMenu(self)
         menu.setStyleSheet(f"""
@@ -866,15 +894,38 @@ class RollCallApp(QWidget):
             a.triggered.connect(lambda _, nn=n: self.set_count(nn))
 
         menu.addSeparator()
+
+        auto_action = QAction("开机自动启动", self)
+        auto_action.setCheckable(True)
+        if sys.platform == 'win32' and get_exe_path():
+            auto_action.setChecked(is_autostart_enabled())
+            auto_action.setEnabled(True)
+            auto_action.triggered.connect(self.toggle_autostart_action)
+        else:
+            auto_action.setChecked(False)
+            auto_action.setEnabled(False)
+            auto_action.setText("开机自动启动（仅 exe 版可用）")
+        menu.addAction(auto_action)
+
+        menu.addSeparator()
         menu.addAction("ℹ  使用说明", self.show_help)
         menu.addAction("✕  退出程序", self.close)
 
         menu.exec(self.mapToGlobal(self.bg.pos() + QPoint(self.EXP_W - 60, self.EXP_H - 30)))
 
+    def toggle_autostart_action(self):
+        current = is_autostart_enabled()
+        new_state = not current
+        ok = set_autostart(new_state)
+        if ok:
+            QMessageBox.information(self, "提示",
+                "已开启开机自启" if new_state else "已关闭开机自启")
+        else:
+            QMessageBox.warning(self, "提示", "设置失败，请确认用的是 exe 版本。")
+
     def set_count(self, n):
         self.count = n; self.pad_buffer = str(n); self._render_pad()
 
-    # ---------------- 导入 / 清空 ----------------
     def import_roster(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "选择花名册文件", "",
@@ -906,9 +957,8 @@ class RollCallApp(QWidget):
         if not self.students:
             QMessageBox.information(self, "提示", "当前没有花名册"); return
 
-        # ★ 弹密码框
         dlg = PasswordDialog(self)
-        dlg.move(self.geometry().center() - QPoint(150, 90))
+        dlg.move(self.geometry().center() - QPoint(150, 100))
         if not dlg.exec() or not dlg.result_ok:
             return
 
@@ -929,10 +979,9 @@ class RollCallApp(QWidget):
             "点「⚙ 设置 → 导入花名册」\n"
             "表头四列：姓名 | 性别 | 选科 | 小组\n\n"
             "【清空花名册】\n"
-            f"需要输入管理密码（默认 {CLEAR_PASSWORD}）\n\n"
+            "需要输入管理密码\n\n"
             "花名册保存在：\n" + str(ROSTER_FILE))
 
-    # ---------------- 拖动 / 收起 ----------------
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and e.position().y() < 40:
             self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -959,14 +1008,10 @@ class RollCallApp(QWidget):
         self.setFixedSize(self.COL_W, self.COL_H)
         self.setWindowOpacity(0.55)
         self.move(new_x, y)
-
-        # 把主布局隐藏，显示箭头
         self._show_arrow(True)
 
     def _show_arrow(self, show):
-        # 简化处理：收起时把内容换成箭头
         if show:
-            # 清空当前 bg 里的布局
             old = self.bg.layout()
             if old:
                 while old.count():
@@ -980,12 +1025,14 @@ class RollCallApp(QWidget):
             arrow.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
             arrow.setStyleSheet("color:#ffffff; background:transparent;")
             lay.addWidget(arrow)
-            self.bg.setStyleSheet(f"background:{ACCENT_LT}; border-radius:6px;")
+            self.bg.bg_color = QColor(ACCENT_LT)
+            self.bg.radius = 6
             self.bg.installEventFilter(self)
             arrow.installEventFilter(self)
+            self.bg.update()
         else:
-            # 展开：重建 UI
-            self.bg.setStyleSheet("")
+            self.bg.bg_color = QColor(BG)
+            self.bg.radius = 18
             old = self.bg.layout()
             if old:
                 while old.count():
@@ -995,7 +1042,6 @@ class RollCallApp(QWidget):
             self._build_ui()
 
     def eventFilter(self, obj, e):
-        from PySide6.QtCore import QEvent
         if self.collapsed:
             if e.type() == QEvent.Enter:
                 QTimer.singleShot(350, self.expand)
@@ -1019,9 +1065,6 @@ class RollCallApp(QWidget):
         self._show_arrow(False)
 
 
-# ============================================================
-#  入口
-# ============================================================
 def main():
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
