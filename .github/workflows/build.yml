@@ -1,23 +1,43 @@
-@echo off
-chcp 65001 >nul
-where python >nul 2>nul
-if errorlevel 1 (echo 请先装 Python & pause & exit /b 1)
+name: Build EXE
 
-echo 安装依赖...
-python -m pip install --upgrade pip -q
-python -m pip install PySide6 openpyxl pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
 
-echo 打包主程序...
-python -m PyInstaller -F -w -n "课堂点名" rollcall.py --clean --noconfirm
+jobs:
+  build:
+    runs-on: windows-latest
 
-echo 打包密码重置工具...
-python -m PyInstaller -F -n "密码重置" reset_password.py --clean --noconfirm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-echo.
-if exist "dist\课堂点名.exe" (
-    echo ✅ 打包完成！文件在 dist 文件夹
-    explorer dist
-) else (
-    echo ❌ 打包失败
-)
-pause
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install PySide6 openpyxl pyinstaller
+
+      - name: Build rollcall
+        run: |
+          pyinstaller -F -w -n "课堂点名" rollcall.py
+
+      - name: Build reset tool
+        run: |
+          pyinstaller -F -n "密码重置" reset_password.py
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: exe-package
+          path: |
+            dist/课堂点名.exe
+            dist/密码重置.exe
+          if-no-files-found: error
