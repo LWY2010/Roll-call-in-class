@@ -36,7 +36,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 ROSTER_FILE = DATA_DIR / "roster.json"
 
 # ============ 密码 ============
-CLEAR_PASSWORD = "888888"      # ★ 清空密码，改这里
+CLEAR_PASSWORD = "0204"      # ★ 清空密码，改这里
 
 # ============ 配色 ============
 BG          = "#c5d4e0"
