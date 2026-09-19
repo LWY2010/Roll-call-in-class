@@ -1,19 +1,35 @@
-@echo off
-chcp 65001 >nul
-where python >nul 2>nul
-if errorlevel 1 (echo 请先装 Python & pause & exit /b 1)
+name: Build EXE
 
-echo 安装依赖...
-python -m pip install --upgrade pip -q
-python -m pip install PySide6 openpyxl pyinstaller -q
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
 
-echo 打包中...
-python -m PyInstaller -F -w -n "课堂点名" rollcall.py
+jobs:
+  build:
+    runs-on: windows-latest
 
-if exist "dist\课堂点名.exe" (
-    echo 成功：dist\课堂点名.exe
-    explorer dist
-) else (
-    echo 失败
-)
-pause
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install PySide6 openpyxl pyinstaller
+
+      - name: 打包 exe
+        run: |
+          pyinstaller -F -w -n "课堂点名" rollcall.py
+
+      - name: 上传 exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: 课堂点名
+          path: dist/课堂点名.exe
+          if-no-files-found: error
