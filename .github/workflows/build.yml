@@ -1,20 +1,19 @@
-name: Build EXE
-on: [push, workflow_dispatch]
+@echo off
+chcp 65001 >nul
+where python >nul 2>nul
+if errorlevel 1 (echo 请先装 Python & pause & exit /b 1)
 
-jobs:
-  build:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install deps
-        run: pip install openpyxl pyinstaller
-      - name: Build
-        run: pyinstaller -F -w -n 课堂点名 rollcall.py
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: 课堂点名
-          path: dist/课堂点名.exe
+echo 安装依赖...
+python -m pip install --upgrade pip -q
+python -m pip install PySide6 openpyxl pyinstaller -q
+
+echo 打包中...
+python -m PyInstaller -F -w -n "课堂点名" rollcall.py
+
+if exist "dist\课堂点名.exe" (
+    echo 成功：dist\课堂点名.exe
+    explorer dist
+) else (
+    echo 失败
+)
+pause
