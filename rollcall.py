@@ -7,6 +7,7 @@
 · 清空花名册需要输入密码
 · 支持开机自动启动
 · 密码支持外部重置（配合 reset_password.py）
+· 关闭时彻底释放文件，不会残留进程
 """
 import json, os, random, re, sys, csv, io
 from pathlib import Path
@@ -47,11 +48,12 @@ SMOKE       = "#5c6f82"
 SMOKE_HOVER = "#4a5a6b"
 GREEN       = "#2f855a"
 DANGER      = "#c53030"
-CHIP_BG     = "#c8d6e2"
-CHIP_BORDER = "#9eb4c7"
-CHIP_TEXT   = "#1a365d"
+CHIP_BG     = "#dbe6ee"
+CHIP_BORDER = "#c5d4e0"
+CHIP_TEXT   = "#8fa9c2"
 CHIP_ON_BG  = "#2c5282"
 CHIP_ON_FG  = "#ffffff"
+CHIP_ON_BORDER = "#1a365d"
 
 # ============ 屏蔽名单 ============
 BLOCKED_NAMES = {'赖韦宇'}
@@ -209,7 +211,7 @@ class RoundedWidget(QWidget):
 
 
 # ============================================================
-#  密码对话框（★ 加了"忘记密码"提示）
+#  密码对话框
 # ============================================================
 class PasswordDialog(QDialog):
     def __init__(self, parent=None):
@@ -217,7 +219,7 @@ class PasswordDialog(QDialog):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.setFixedSize(300, 200)      # ★ 高度从 180 加到 200，容纳提示
+        self.setFixedSize(300, 200)
         self.result_ok = False
 
         outer = QVBoxLayout(self)
@@ -236,7 +238,6 @@ class PasswordDialog(QDialog):
         title.setAlignment(Qt.AlignCenter)
         lay.addWidget(title)
 
-        # ★ 密码提示
         hint = QLabel("忘记密码请联系程序设计者")
         hint.setFont(QFont("Microsoft YaHei", 8))
         hint.setStyleSheet(f"color:{MUTED}; background:transparent;")
@@ -298,7 +299,6 @@ class PasswordDialog(QDialog):
         self.edit.setFocus()
 
     def try_ok(self):
-        # ★ 用 get_current_password() 而不是常量
         if self.edit.text() == get_current_password():
             self.result_ok = True
             self.accept()
@@ -408,6 +408,7 @@ class RollCallApp(QWidget):
         self.collapsed = False
         self.saved_pos = None
         self._drag_pos = None
+        self._numpad = None
 
         screen = QApplication.primaryScreen().availableGeometry()
         self.sw, self.sh = screen.width(), screen.height()
@@ -420,11 +421,13 @@ class RollCallApp(QWidget):
 
         self._build_ui()
 
+    # ---------------- UI ----------------
     def _build_ui(self):
         main = QVBoxLayout(self.bg)
         main.setContentsMargins(0, 0, 0, 0)
         main.setSpacing(0)
 
+        # 标题栏
         title = QFrame()
         title.setFixedHeight(40)
         title.setStyleSheet(f"background:{PANEL}; border-top-left-radius:18px; border-top-right-radius:18px;")
@@ -466,12 +469,14 @@ class RollCallApp(QWidget):
 
         main.addWidget(title)
 
+        # 内容区
         content = QWidget()
         content.setStyleSheet("background:transparent;")
         clay = QVBoxLayout(content)
         clay.setContentsMargins(14, 14, 14, 14)
         clay.setSpacing(10)
 
+        # 结果卡片
         self.result_card = QFrame()
         self.result_card.setFixedHeight(120)
         self.result_card.setStyleSheet(f"""
@@ -489,6 +494,7 @@ class RollCallApp(QWidget):
         rlay.addWidget(self.result_label)
         clay.addWidget(self.result_card)
 
+        # 性别
         clay.addWidget(self._section_label("性别"))
         self.gender_row = QHBoxLayout()
         self.gender_row.setSpacing(6)
@@ -496,6 +502,7 @@ class RollCallApp(QWidget):
         gw = QWidget(); gw.setStyleSheet("background:transparent;"); gw.setLayout(self.gender_row)
         clay.addWidget(gw)
 
+        # 选科
         clay.addWidget(self._section_label("选科"))
         self.subject_row = QHBoxLayout()
         self.subject_row.setSpacing(6)
@@ -503,6 +510,7 @@ class RollCallApp(QWidget):
         sw = QWidget(); sw.setStyleSheet("background:transparent;"); sw.setLayout(self.subject_row)
         clay.addWidget(sw)
 
+        # 小组
         clay.addWidget(self._section_label("小组"))
         self.group_row = QHBoxLayout()
         self.group_row.setSpacing(6)
@@ -510,6 +518,7 @@ class RollCallApp(QWidget):
         grw = QWidget(); grw.setStyleSheet("background:transparent;"); grw.setLayout(self.group_row)
         clay.addWidget(grw)
 
+        # 抽取设置
         clay.addWidget(self._section_label("抽取设置"))
         setrow = QHBoxLayout()
         setrow.setContentsMargins(0, 0, 0, 0)
@@ -582,6 +591,7 @@ class RollCallApp(QWidget):
         setrow.addWidget(num_box)
         clay.addLayout(setrow)
 
+        # 候选人数
         pool_box = QFrame()
         pool_box.setFixedHeight(38)
         pool_box.setStyleSheet(f"""
@@ -605,6 +615,7 @@ class RollCallApp(QWidget):
         play.addWidget(self.pool_count_label)
         clay.addWidget(pool_box)
 
+        # 抽取按钮
         self.draw_btn = QPushButton("开 始 抽 取")
         self.draw_btn.setCursor(Qt.PointingHandCursor)
         self.draw_btn.setFixedHeight(52)
@@ -621,6 +632,7 @@ class RollCallApp(QWidget):
         self.draw_btn.clicked.connect(self.on_draw_click)
         clay.addWidget(self.draw_btn)
 
+        # 底部
         bottom = QHBoxLayout()
         bottom.setContentsMargins(2, 0, 2, 0)
         self.status_label = QLabel("")
@@ -661,31 +673,35 @@ class RollCallApp(QWidget):
             if w is not None:
                 w.deleteLater()
 
+    # ★★★ 筛选按钮：选中态明显不同 ★★★
     def _make_chip(self, text, on, command):
-        btn = QPushButton(text)
+        btn = QPushButton(("✓ " if on else "") + text)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setFixedHeight(28)
         if on:
-            style = f"""
+            # 选中：深海蓝底 + 纯白字 + 深蓝边框
+            btn.setStyleSheet(f"""
                 QPushButton {{
                     background:{CHIP_ON_BG}; color:{CHIP_ON_FG};
-                    border:none; border-radius:14px;
-                    padding:0 14px;
+                    border:2px solid {CHIP_ON_BORDER};
+                    border-radius:14px;
+                    padding:0 12px;
                     font-family:'Microsoft YaHei'; font-size:9pt; font-weight:bold;
                 }}
                 QPushButton:hover {{ background:{ACCENT_LT}; }}
-            """
+            """)
         else:
-            style = f"""
+            # 未选中：极浅灰蓝底 + 淡蓝字
+            btn.setStyleSheet(f"""
                 QPushButton {{
                     background:{CHIP_BG}; color:{CHIP_TEXT};
-                    border:1px solid {CHIP_BORDER}; border-radius:14px;
+                    border:1px solid {CHIP_BORDER};
+                    border-radius:14px;
                     padding:0 14px;
                     font-family:'Microsoft YaHei'; font-size:9pt; font-weight:bold;
                 }}
-                QPushButton:hover {{ background:#b0c4d4; }}
-            """
-        btn.setStyleSheet(style)
+                QPushButton:hover {{ background:#cddde8; color:#5a7d9e; }}
+            """)
         btn.clicked.connect(command)
         return btn
 
@@ -755,6 +771,7 @@ class RollCallApp(QWidget):
         self.pool_count_label.setText(f"{len(pool)} 人")
         self.status_label.setText(f"花名册 {len(self.students)} 人")
 
+    # ---------------- 数字框 ----------------
     def _nudge(self, delta):
         try: v = int(self.pad_buffer)
         except Exception: v = 1
@@ -800,6 +817,7 @@ class RollCallApp(QWidget):
         except Exception:
             self.count = 1
 
+    # ---------------- 抽取 ----------------
     def on_draw_click(self):
         if self.drawing: self._stop_rolling()
         else: self._start_rolling()
@@ -825,7 +843,11 @@ class RollCallApp(QWidget):
             }}
             QPushButton:hover {{ background:#a82020; }}
         """)
-        self._tick()
+        # 启动计时器
+        if self._roll_timer is None:
+            self._roll_timer = QTimer(self)
+            self._roll_timer.timeout.connect(self._tick)
+        self._roll_timer.start(70)
 
     def _fmt_names(self, picks):
         n = len(picks)
@@ -835,16 +857,20 @@ class RollCallApp(QWidget):
         return '  '.join(p['name'] for p in picks), 9
 
     def _tick(self):
-        if not self.drawing: return
+        if not self.drawing:
+            if self._roll_timer:
+                self._roll_timer.stop()
+            return
         n = min(self.count, len(self._roll_pool))
         picks = random.sample(self._roll_pool, n)
         text, fs = self._fmt_names(picks)
         self.result_label.setText(text)
         self.result_label.setFont(QFont("Microsoft YaHei", fs, QFont.Bold))
-        self._roll_timer = QTimer.singleShot(70, self._tick)
 
     def _stop_rolling(self):
         self.drawing = False
+        if self._roll_timer:
+            self._roll_timer.stop()
         self.draw_btn.setText("开 始 抽 取")
         self.draw_btn.setStyleSheet(f"""
             QPushButton {{
@@ -861,6 +887,7 @@ class RollCallApp(QWidget):
         self.result_label.setText(text)
         self.result_label.setFont(QFont("Microsoft YaHei", fs, QFont.Bold))
 
+    # ---------------- 菜单 ----------------
     def show_menu(self):
         menu = QMenu(self)
         menu.setStyleSheet(f"""
@@ -926,6 +953,7 @@ class RollCallApp(QWidget):
     def set_count(self, n):
         self.count = n; self.pad_buffer = str(n); self._render_pad()
 
+    # ---------------- 导入 / 清空 ----------------
     def import_roster(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "选择花名册文件", "",
@@ -982,6 +1010,7 @@ class RollCallApp(QWidget):
             "需要输入管理密码\n\n"
             "花名册保存在：\n" + str(ROSTER_FILE))
 
+    # ---------------- 拖动 / 收起 ----------------
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and e.position().y() < 40:
             self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -994,6 +1023,29 @@ class RollCallApp(QWidget):
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
+
+    # ★★★ 关闭时彻底释放 ★★★
+    def closeEvent(self, event):
+        self.drawing = False
+        if self._roll_timer:
+            try:
+                self._roll_timer.stop()
+            except Exception:
+                pass
+            self._roll_timer = None
+
+        if self._numpad:
+            try:
+                self._numpad.close()
+                self._numpad.deleteLater()
+            except Exception:
+                pass
+            self._numpad = None
+
+        self.hide()
+        QApplication.processEvents()
+        event.accept()
+        QTimer.singleShot(100, QApplication.quit)
 
     def collapse(self):
         if self.collapsed: return
@@ -1065,14 +1117,19 @@ class RollCallApp(QWidget):
         self._show_arrow(False)
 
 
+# ============================================================
+#  入口
+# ============================================================
 def main():
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setFont(QFont("Microsoft YaHei", 10))
+    app.setQuitOnLastWindowClosed(True)
     win = RollCallApp()
     win.show()
-    sys.exit(app.exec())
+    code = app.exec()
+    sys.exit(code)
 
 
 if __name__ == '__main__':
