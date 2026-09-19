@@ -4,18 +4,14 @@
 · 真圆角 + 真透明
 · 悬浮在 PPT 上也能用
 · 收起后贴在屏幕边缘成半透明小箭头
-· 清空花名册需要输入密码
-· 清除本地配置需要输入密码
+· 清空花名册 / 清除本地配置需要密码
 · 支持开机自动启动
-· 密码支持外部重置（配合 reset_password.py）
-· 关闭时彻底释放文件，不会残留进程
-· 筛选按钮点击立即变色
 """
-import json, os, random, re, sys, csv, io, shutil
+import json, os, random, re, sys, csv, io
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QPoint, QRectF, QEvent
-from PySide6.QtGui import QFont, QColor, QPainter, QPainterPath, QBrush, QAction
+from PySide6.QtCore import Qt, QTimer, QPoint, QEvent
+from PySide6.QtGui import QFont, QColor, QAction
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFrame, QHBoxLayout, QVBoxLayout,
     QGridLayout, QLineEdit, QDialog, QMenu, QFileDialog, QMessageBox
@@ -189,27 +185,6 @@ def parse_xlsx(path):
 
 
 # ============================================================
-#  圆角容器（背景穿透鼠标）
-# ============================================================
-class RoundedWidget(QWidget):
-    def __init__(self, radius=18, bg=BG, parent=None):
-        super().__init__(parent)
-        self.radius = radius
-        self.bg_color = QColor(bg)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        path = QPainterPath()
-        rect = QRectF(0, 0, self.width(), self.height())
-        path.addRoundedRect(rect, self.radius, self.radius)
-        painter.fillPath(path, QBrush(self.bg_color))
-        painter.end()
-
-
-# ============================================================
 #  密码对话框
 # ============================================================
 class PasswordDialog(QDialog):
@@ -224,11 +199,17 @@ class PasswordDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        self.bg = RoundedWidget(radius=14, bg=PANEL, parent=self)
-        self.bg.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-        outer.addWidget(self.bg)
+        panel = QFrame()
+        panel.setObjectName("pwdPanel")
+        panel.setStyleSheet(f"""
+            QFrame#pwdPanel {{
+                background:{PANEL};
+                border-radius:14px;
+            }}
+        """)
+        outer.addWidget(panel)
 
-        lay = QVBoxLayout(self.bg)
+        lay = QVBoxLayout(panel)
         lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(10)
 
@@ -330,11 +311,17 @@ class NumPad(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        self.bg = RoundedWidget(radius=10, bg=ACCENT, parent=self)
-        self.bg.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-        outer.addWidget(self.bg)
+        panel = QFrame()
+        panel.setObjectName("npPanel")
+        panel.setStyleSheet(f"""
+            QFrame#npPanel {{
+                background:{ACCENT};
+                border-radius:10px;
+            }}
+        """)
+        outer.addWidget(panel)
 
-        grid = QGridLayout(self.bg)
+        grid = QGridLayout(panel)
         grid.setContentsMargins(6, 6, 6, 6)
         grid.setSpacing(4)
 
@@ -421,14 +408,33 @@ class RollCallApp(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        self.bg = RoundedWidget(radius=18, bg=BG, parent=self)
-        outer.addWidget(self.bg)
+
+        # ★ 用 QFrame 替代 RoundedWidget，QFrame 天然接收事件，子控件不受影响
+        self.panel = QFrame()
+        self.panel.setObjectName("mainPanel")
+        self.panel.setStyleSheet(f"""
+            QFrame#mainPanel {{
+                background:{BG};
+                border-radius:18px;
+            }}
+        """)
+        outer.addWidget(self.panel)
 
         self._build_ui()
 
     # ---------------- UI ----------------
     def _build_ui(self):
-        main = QVBoxLayout(self.bg)
+        # 清空 panel 现有布局
+        old = self.panel.layout()
+        if old:
+            while old.count():
+                it = old.takeAt(0)
+                w = it.widget()
+                if w:
+                    w.setParent(None)
+                    w.deleteLater()
+
+        main = QVBoxLayout(self.panel)
         main.setContentsMargins(0, 0, 0, 0)
         main.setSpacing(0)
 
@@ -495,7 +501,7 @@ class RollCallApp(QWidget):
         self.result_label = QLabel("尚未导入花名册")
         self.result_label.setAlignment(Qt.AlignCenter)
         self.result_label.setFont(QFont("Microsoft YaHei", 22, QFont.Bold))
-        self.result_label.setStyleSheet(f"color:#ffffff; background:transparent;")
+        self.result_label.setStyleSheet("color:#ffffff; background:transparent;")
         rlay.addWidget(self.result_label)
         clay.addWidget(self.result_card)
 
@@ -688,7 +694,6 @@ class RollCallApp(QWidget):
         btn = QPushButton(text)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setFixedHeight(30)
-        btn.setAttribute(Qt.WA_AlwaysStackOnTop, True)
         self._apply_chip_style(btn, False, text)
         btn.clicked.connect(command)
         return btn
@@ -732,6 +737,7 @@ class RollCallApp(QWidget):
             """)
 
     def _build_filters(self):
+        # 性别
         self._clear_layout(self.gender_row)
         self.gender_chips = {}
         opts = [('all', '全部')]
@@ -748,6 +754,7 @@ class RollCallApp(QWidget):
             self.gender_row.addWidget(btn)
         self.gender_row.addStretch()
 
+        # 选科
         self._clear_layout(self.subject_row)
         self.subject_chips = {}
         seen, sset = [], set()
@@ -773,6 +780,7 @@ class RollCallApp(QWidget):
             self.subject_row.addWidget(lbl)
         self.subject_row.addStretch()
 
+        # 小组
         self._clear_layout(self.group_row)
         self.group_chips = {}
         groups = sorted({s['group'] for s in self.students if s.get('group')},
@@ -987,7 +995,7 @@ class RollCallApp(QWidget):
         menu.addAction("ℹ  使用说明", self.show_help)
         menu.addAction("✕  退出程序", self.close)
 
-        menu.exec(self.mapToGlobal(self.bg.pos() + QPoint(self.EXP_W - 60, self.EXP_H - 30)))
+        menu.exec(self.mapToGlobal(self.panel.pos() + QPoint(self.EXP_W - 60, self.EXP_H - 30)))
 
     def toggle_autostart_action(self):
         current = is_autostart_enabled()
@@ -1049,13 +1057,11 @@ class RollCallApp(QWidget):
         QMessageBox.information(self, "已清空", "花名册已清空。")
 
     def clear_config(self):
-        """清除本地所有配置文件（需要密码）"""
         dlg = PasswordDialog(self)
         dlg.move(self.geometry().center() - QPoint(150, 100))
         if not dlg.exec() or not dlg.result_ok:
             return
 
-        # 二次确认
         r = QMessageBox.question(
             self, "确认",
             "确定要清除所有本地配置吗？\n\n"
@@ -1069,7 +1075,6 @@ class RollCallApp(QWidget):
         if r != QMessageBox.Yes:
             return
 
-        # 删除配置文件
         try:
             if ROSTER_FILE.exists():
                 ROSTER_FILE.unlink()
@@ -1080,7 +1085,6 @@ class RollCallApp(QWidget):
                 f"删除文件失败：{e}\n\n请手动删除：\n{DATA_DIR}")
             return
 
-        # 清空内存状态
         self.students = []
         self.filters = {'gender': 'all', 'subjects': set(), 'groups': set()}
         self._build_filters()
@@ -1165,7 +1169,7 @@ class RollCallApp(QWidget):
 
     def _show_arrow(self, show):
         if show:
-            old = self.bg.layout()
+            old = self.panel.layout()
             if old:
                 while old.count():
                     it = old.takeAt(0)
@@ -1173,22 +1177,29 @@ class RollCallApp(QWidget):
                     if w:
                         w.setParent(None)
                         w.deleteLater()
-            lay = QVBoxLayout(self.bg)
+            self.panel.setStyleSheet(f"""
+                QFrame#mainPanel {{
+                    background:{ACCENT_LT};
+                    border-radius:6px;
+                }}
+            """)
+            lay = QVBoxLayout(self.panel)
             lay.setContentsMargins(0, 0, 0, 0)
             arrow = QLabel("◀" if self.x() > self.sw // 2 else "▶")
             arrow.setAlignment(Qt.AlignCenter)
             arrow.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
             arrow.setStyleSheet("color:#ffffff; background:transparent;")
             lay.addWidget(arrow)
-            self.bg.bg_color = QColor(ACCENT_LT)
-            self.bg.radius = 6
-            self.bg.installEventFilter(self)
+            self.panel.installEventFilter(self)
             arrow.installEventFilter(self)
-            self.bg.update()
         else:
-            self.bg.bg_color = QColor(BG)
-            self.bg.radius = 18
-            old = self.bg.layout()
+            self.panel.setStyleSheet(f"""
+                QFrame#mainPanel {{
+                    background:{BG};
+                    border-radius:18px;
+                }}
+            """)
+            old = self.panel.layout()
             if old:
                 while old.count():
                     it = old.takeAt(0)
